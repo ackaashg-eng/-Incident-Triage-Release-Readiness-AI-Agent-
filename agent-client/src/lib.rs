@@ -23,3 +23,5 @@ pub mod config;
 pub mod llm;
 pub mod logging;
 pub mod mcp;
+pub mod safety;
+pub mod trace;

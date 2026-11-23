@@ -8,5 +8,6 @@ pub mod runner;
 pub mod validate;
 
 pub use runner::{
-    Agent, AgentEvent, AgentSettings, NoopObserver, Observer, TurnOutcome, TurnReport,
+    Agent, AgentEvent, AgentSettings, ApprovalStatus, Fanout, NoopObserver, Observer,
+    ToolCallRecord, ToolStatus, TurnOutcome, TurnReport,
 };

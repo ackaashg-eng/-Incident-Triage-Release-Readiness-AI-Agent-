@@ -19,9 +19,14 @@ serde.workspace = true
 serde_json.workspace = true
 # Claude Messages API over HTTPS (no official Rust SDK exists).
 reqwest.workspace = true
+# Approval binding (payload hash) and trace timestamps.
+sha2.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Security tests read the ticket database directly to prove what was (not) created.
+rusqlite.workspace = true
 
 [lints]
 workspace = true

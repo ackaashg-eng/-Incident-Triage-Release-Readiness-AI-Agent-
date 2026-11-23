@@ -184,3 +184,149 @@ pub fn project_root() -> std::path::PathBuf {
     )
     .unwrap()
 }
+
+// ---------------------------------------------------------------------------
+// Scripted Claude + agent builder (agent-level tests with the REAL servers)
+// ---------------------------------------------------------------------------
+
+use agent_client::agent::approval::Approver;
+use agent_client::agent::{Agent, AgentEvent, AgentSettings, Observer, ToolCallRecord, ToolStatus};
+use agent_client::config::{Effort, McpSettings};
+use agent_client::llm::{LlmClient, LlmError, MessageResponse, MessagesRequest};
+use agent_client::mcp::manager::ServerSet;
+
+/// Replays fixed Claude responses and records every request.
+#[derive(Clone, Default)]
+pub struct ScriptedLlm {
+    replies: Arc<Mutex<std::collections::VecDeque<Result<MessageResponse, LlmError>>>>,
+    requests: Arc<Mutex<Vec<MessagesRequest>>>,
+}
+
+impl ScriptedLlm {
+    pub fn new(replies: Vec<Result<Value, LlmError>>) -> Self {
+        let replies = replies
+            .into_iter()
+            .map(|r| r.map(|v| serde_json::from_value(v).unwrap()))
+            .collect();
+        Self {
+            replies: Arc::new(Mutex::new(replies)),
+            requests: Arc::default(),
+        }
+    }
+
+    pub fn requests(&self) -> Vec<MessagesRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl LlmClient for ScriptedLlm {
+    async fn send(&self, request: &MessagesRequest) -> Result<MessageResponse, LlmError> {
+        self.requests.lock().unwrap().push(request.clone());
+        self.replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(LlmError::Malformed("script ended".into())))
+    }
+}
+
+/// Records events as short strings (`.0`) and full tool records (`.1`).
+#[derive(Default)]
+pub struct Recorder(pub Mutex<Vec<String>>, pub Mutex<Vec<ToolCallRecord>>);
+
+impl Recorder {
+    pub fn records(&self) -> Vec<ToolCallRecord> {
+        self.1.lock().unwrap().clone()
+    }
+}
+
+impl Observer for Recorder {
+    fn on_event(&self, event: &AgentEvent<'_>) {
+        let line = match event {
+            AgentEvent::ToolStart { name, .. } => format!("start {name}"),
+            AgentEvent::ToolEnd(rec) => {
+                self.1.lock().unwrap().push((*rec).clone());
+                format!("end {} {}", rec.name, rec.status == ToolStatus::Ok)
+            }
+            AgentEvent::Approval { proposal, .. } => format!("proposal {}", proposal.tool),
+            AgentEvent::Note(n) => format!("note {n}"),
+            AgentEvent::Warning(w) => format!("warning {w}"),
+            _ => return,
+        };
+        self.0.lock().unwrap().push(line);
+    }
+}
+
+pub fn tool_use(id: &str, name: &str, input: Value) -> Value {
+    json!({"type": "tool_use", "id": id, "name": name, "input": input})
+}
+
+/// MCP settings for the real servers, with a throw-away ticket DB.
+pub fn mcp_settings(tickets: &std::path::Path) -> McpSettings {
+    let mut s = McpSettings::from_lookup(&project_root(), &|_: &str| None).unwrap();
+    s.tickets_db = tickets.to_path_buf();
+    s
+}
+
+pub fn agent_settings(max_iterations: u32) -> AgentSettings {
+    AgentSettings {
+        model: "claude-opus-5-5".into(),
+        effort: Effort::Medium,
+        fallbacks: true,
+        progress_updates: true,
+        max_iterations,
+        max_tokens: 16_000,
+        tool_timeout: Duration::from_secs(10),
+        tool_timeouts: Default::default(),
+        secrets: vec!["sk-ant-test-SECRET-KEY-0123456789".to_string()],
+        path_aliases: {
+            let mut a = vec![(
+                project_root().display().to_string(),
+                "<project>".to_string(),
+            )];
+            if let Some(home) = std::env::var_os("USERPROFILE") {
+                a.push((home.to_string_lossy().into_owned(), "<home>".to_string()));
+            }
+            a
+        },
+    }
+}
+
+pub async fn build_agent(
+    llm: ScriptedLlm,
+    tickets: &std::path::Path,
+    max_iterations: u32,
+    approver: Box<dyn Approver>,
+) -> Agent<ScriptedLlm> {
+    let servers = ServerSet::connect_all(&mcp_settings(tickets)).await;
+    assert!(
+        servers.unavailable().is_empty(),
+        "{:?}",
+        servers.unavailable()
+    );
+    Agent::new(
+        llm,
+        agent_settings(max_iterations),
+        servers,
+        "2026-11-20T12:00:00Z",
+        approver,
+    )
+}
+
+/// The tool_result blocks of a request's last message: (id, content, is_error).
+pub fn tool_results(request: &MessagesRequest) -> Vec<(String, String, bool)> {
+    let last = request.messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    last["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["tool_use_id"].as_str().unwrap().to_string(),
+                b["content"].as_str().unwrap().to_string(),
+                b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+            )
+        })
+        .collect()
+}

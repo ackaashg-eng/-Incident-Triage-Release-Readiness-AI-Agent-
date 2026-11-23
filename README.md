@@ -62,6 +62,7 @@ All settings live in `.env` (git-ignored). `.env.example` documents each one wit
 | `TOOL_TIMEOUT_SECS` | `10` | Per-tool timeout (1–300) |
 | `OPS_REFERENCE_TIME` | `2026-11-20T12:00:00Z` | "Now" for the simulated data (`now` = real clock) |
 | `LOG_LEVEL` | `warn` | Diagnostics on stderr (`RUST_LOG` overrides) |
+| `TOOL_TIMEOUT_OVERRIDES` | — | Per-tool timeouts, e.g. `files__search_files=30,telemetry__search_logs=5` |
 | `MCP_STARTUP_TIMEOUT_SECS` | `20` | Time a server may take to start (1–120) |
 | `NODE_EXE` | `node` | Node.js executable for the filesystem server |
 
@@ -93,7 +94,17 @@ claude> Summary: ...
 
 Interactive commands: `/tools`, `/servers`, `/reset` (forget the conversation), `/help`, `/exit`. Ctrl+C cancels the current request; at the prompt it exits.
 
-A tool that changes something (`create_incident_ticket`) is only **proposed**: the proposal is shown, and nothing runs until a human approves it. The approval prompt arrives in Phase 6; until then proposals are shown but not executed.
+**Safety:** a tool that changes something (`create_incident_ticket`) pauses the agent and shows you the exact payload and its SHA-256:
+
+```text
+  ==================== APPROVAL REQUIRED ====================
+  Tool:   telemetry__create_incident_ticket  (server: telemetry)
+  | { "assignee": "payments-oncall", "severity": "CRITICAL", ... }
+  Payload SHA-256: 3f9a...
+  Approve this exact payload? [a]pprove / [r]eject / [e]dit:
+```
+
+Only what you approve runs; an edit needs a fresh approval. Tool output is labelled as untrusted data, instruction-like text is flagged, secrets are redacted, and every step is written to `traces\agent_traces.jsonl`. Details and test evidence: [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 

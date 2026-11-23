@@ -7,6 +7,7 @@
 //! instead of reading `std::env` directly, so tests can feed in a plain map
 //! without touching the process environment.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -135,6 +136,8 @@ pub struct Config {
     pub max_iterations: u32,
     /// How to launch and talk to the two MCP servers.
     pub mcp: McpSettings,
+    /// Per-tool timeouts (namespaced tool name → timeout), overriding `TOOL_TIMEOUT_SECS`.
+    pub tool_timeout_overrides: BTreeMap<String, Duration>,
     pub trace_file: PathBuf,
     pub log_level: String,
 }
@@ -216,6 +219,7 @@ impl Config {
         )?;
 
         let mcp = McpSettings::from_lookup(base_dir, lookup)?;
+        let tool_timeout_overrides = parse_timeout_overrides(get("TOOL_TIMEOUT_OVERRIDES"))?;
 
         Ok(Self {
             api_key,
@@ -227,6 +231,7 @@ impl Config {
             request_timeout: Duration::from_secs(request_timeout_secs),
             max_iterations,
             mcp,
+            tool_timeout_overrides,
             trace_file: resolve(
                 base_dir,
                 &get("TRACE_FILE").unwrap_or_else(|| r"traces\agent_traces.jsonl".to_string()),
@@ -336,6 +341,43 @@ pub fn load_dotenv(base_dir: &Path) -> Result<(), ConfigError> {
         .map_err(|e| ConfigError::EnvFile(e.to_string()))
 }
 
+/// `files__search_files=30,telemetry__search_logs=5` → map. Seconds 1-300.
+fn parse_timeout_overrides(
+    value: Option<String>,
+) -> Result<BTreeMap<String, Duration>, ConfigError> {
+    let mut out = BTreeMap::new();
+    let Some(raw) = value else { return Ok(out) };
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let invalid = |reason: &str| ConfigError::InvalidValue {
+            name: "TOOL_TIMEOUT_OVERRIDES",
+            value: raw.clone(),
+            reason: format!(
+                "{reason} (expected tool=seconds, comma-separated, e.g. files__search_files=30)"
+            ),
+        };
+        let (tool, secs) = part
+            .split_once('=')
+            .ok_or_else(|| invalid(&format!("`{part}` has no '='")))?;
+        let tool = tool.trim();
+        if tool.is_empty()
+            || !tool
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(invalid(&format!("`{tool}` is not a tool name")));
+        }
+        let secs: u64 = secs
+            .trim()
+            .parse()
+            .map_err(|_| invalid(&format!("`{secs}` is not a whole number")))?;
+        if !(1..=300).contains(&secs) {
+            return Err(invalid("seconds must be between 1 and 300"));
+        }
+        out.insert(tool.to_string(), Duration::from_secs(secs));
+    }
+    Ok(out)
+}
+
 fn parse_on_off(name: &'static str, value: &str) -> Result<bool, ConfigError> {
     match value.to_ascii_lowercase().as_str() {
         "on" | "true" | "1" | "yes" => Ok(true),
@@ -422,6 +464,37 @@ mod tests {
             Path::new(BASE).join(r"mock_data\workspace")
         );
         assert_eq!(cfg.log_level, "warn");
+    }
+
+    #[test]
+    fn per_tool_timeouts_are_parsed_and_validated() {
+        let cfg = load(&[
+            ("ANTHROPIC_API_KEY", "k"),
+            (
+                "TOOL_TIMEOUT_OVERRIDES",
+                " files__search_files=30, telemetry__search_logs=5 ",
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            cfg.tool_timeout_overrides.get("files__search_files"),
+            Some(&Duration::from_secs(30))
+        );
+        assert_eq!(cfg.tool_timeout_overrides.len(), 2);
+        for bad in ["x", "a=0", "a=301", "a=ten", "bad name=5"] {
+            let err =
+                load(&[("ANTHROPIC_API_KEY", "k"), ("TOOL_TIMEOUT_OVERRIDES", bad)]).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::InvalidValue {
+                        name: "TOOL_TIMEOUT_OVERRIDES",
+                        ..
+                    }
+                ),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -1,31 +1,38 @@
 //! The command-line interface: an interactive session (`agent-client`) and a
 //! one-shot mode (`agent-client ask "..."`). Both print the agent's progress
-//! as it happens: each model call, every tool call with its arguments and
-//! outcome, progress notes, proposals, and the final answer.
+//! as it happens (each model call, every tool call with its outcome, progress
+//! notes, security warnings), ask a human before any state-changing action,
+//! and write every step to the JSONL trace file.
 
 use std::io::Write;
 
 use anyhow::{Context, Result, bail};
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use serde_json::{Value, json};
 
-use crate::agent::approval::{Decision, DeferredApprover};
+use crate::agent::approval::{ConsoleApprover, Decision, LineSource, SharedStdin};
 use crate::agent::registry::Permission;
-use crate::agent::{Agent, AgentEvent, AgentSettings, Observer, TurnOutcome, TurnReport};
+use crate::agent::{
+    Agent, AgentEvent, AgentSettings, ApprovalStatus, Fanout, Observer, ToolStatus, TurnOutcome,
+    TurnReport,
+};
 use crate::config::Config;
 use crate::llm::types::MAX_TOKENS;
 use crate::llm::{AnthropicClient, StopReason};
 use crate::mcp::manager::ServerSet;
+use crate::safety::redact::Redactor;
+use crate::trace::{Tracer, new_session_id};
 
 const HELP: &str = "Type an investigation request, e.g. \"Investigate the payments-api errors\".
 Commands: /tools  list discovered tools    /servers  show MCP servers
           /reset  forget the conversation  /help     this text
           /exit   quit (also /quit, Ctrl+Z then Enter, or Ctrl+C at the prompt)
-Ctrl+C while the agent is working cancels that request.";
+Ctrl+C while the agent is working cancels that request.
+State-changing actions (incident tickets) always stop and ask you first.";
 
 /// Prints agent events to the console.
 pub struct ConsoleObserver {
     pub show_tokens: bool,
+    pub redactor: Redactor,
 }
 
 impl Observer for ConsoleObserver {
@@ -39,10 +46,11 @@ impl Observer for ConsoleObserver {
                 input_tokens,
                 output_tokens,
                 cache_read,
+                millis,
             } => {
                 if self.show_tokens {
                     println!(
-                        "    (stop: {}, tokens in {input_tokens} / cached {cache_read} / out {output_tokens})",
+                        "    (stop: {}, {millis} ms, tokens in {input_tokens} / cached {cache_read} / out {output_tokens})",
                         stop_label(stop)
                     );
                 }
@@ -62,36 +70,65 @@ impl Observer for ConsoleObserver {
             } => {
                 let tag = match permission {
                     Permission::ReadOnly => "",
-                    Permission::RequiresApproval => "  [needs approval]",
+                    Permission::RequiresApproval => "  [STATE-CHANGING: needs your approval]",
                     Permission::Blocked => "  [blocked]",
                 };
-                println!("  -> {name} {}{tag}", compact(input, 160));
-            }
-            AgentEvent::ToolEnd {
-                name,
-                ok,
-                summary,
-                millis,
-            } => {
                 println!(
-                    "     {} {name}: {summary} ({millis} ms)",
-                    if *ok { "ok" } else { "!!" }
+                    "  -> {name} {}{tag}",
+                    compact(&self.redactor.json(input), 160)
                 );
             }
-            AgentEvent::Proposal { proposal, decision } => {
-                println!("\n  ==== PROPOSED ACTION: {} ====", proposal.tool);
-                let pretty = serde_json::to_string_pretty(&proposal.arguments).unwrap_or_default();
-                for line in pretty.lines() {
-                    println!("  | {line}");
-                }
-                let status = match decision {
-                    Decision::Approved(_) => "approved - executing".to_string(),
-                    Decision::Rejected(r) => format!("rejected: {r}"),
-                    Decision::Unavailable(r) => format!("NOT executed: {r}"),
+            AgentEvent::Approval { decision, .. } => {
+                let line = match decision {
+                    Decision::Approved { edited: false, .. } => {
+                        "  >> APPROVED - executing exactly the payload shown".to_string()
+                    }
+                    Decision::Approved { edited: true, .. } => {
+                        "  >> EDITED and APPROVED - executing the edited payload".to_string()
+                    }
+                    Decision::Rejected { reason, .. } => {
+                        format!("  >> REJECTED ({reason}) - nothing was executed")
+                    }
+                    Decision::Unavailable(r) => format!("  >> NOT EXECUTED: {r}"),
                 };
-                println!("  ==== {status} ====\n");
+                println!("{line}");
             }
-            AgentEvent::Warning(w) => println!("  ! {w}"),
+            AgentEvent::ToolEnd(rec) => {
+                let mark = match rec.status {
+                    ToolStatus::Ok => "ok",
+                    ToolStatus::Rejected | ToolStatus::NotExecuted => "--",
+                    _ => "!!",
+                };
+                let mut line = format!(
+                    "     {mark} {}: {} ({} ms)",
+                    rec.name,
+                    self.redactor.redact_str(&rec.summary),
+                    rec.duration_ms
+                );
+                if rec.status != ToolStatus::Ok && rec.status != ToolStatus::ToolError {
+                    line.push_str(&format!(" [{}]", rec.status.as_str()));
+                }
+                if rec.approval == ApprovalStatus::PayloadMismatch {
+                    line.push_str(" [payload changed after approval - blocked]");
+                }
+                println!("{line}");
+                if !rec.injection_flags.is_empty() {
+                    println!(
+                        "     !! SECURITY: instruction-like text in this output ({}). Labelled as untrusted data for Claude.",
+                        rec.injection_flags.join(", ")
+                    );
+                }
+                if rec.redactions > 0 {
+                    println!(
+                        "     !! {} secret-looking value(s) redacted from this output",
+                        rec.redactions
+                    );
+                }
+            }
+            AgentEvent::Warning(w) => println!("  ! {}", self.redactor.redact_str(w)),
+            AgentEvent::TurnStart { .. }
+            | AgentEvent::TurnEnd(_)
+            | AgentEvent::ModelError { .. } => {}
         }
         let _ = std::io::stdout().flush();
     }
@@ -128,11 +165,62 @@ fn agent_settings(config: &Config) -> AgentSettings {
         max_iterations: config.max_iterations,
         max_tokens: MAX_TOKENS,
         tool_timeout: config.mcp.tool_timeout,
+        tool_timeouts: config.tool_timeout_overrides.clone(),
+        secrets: vec![config.api_key.expose().to_string()],
+        path_aliases: path_aliases(config),
     }
 }
 
-/// Connects both MCP servers, discovers tools and builds the agent.
-pub async fn start_agent(config: &Config) -> Result<Agent<AnthropicClient>> {
+/// The project folder and the user's home folder, shown as placeholders.
+fn path_aliases(config: &Config) -> Vec<(String, String)> {
+    let mut aliases = Vec::new();
+    if let Ok(root) = crate::mcp::filesystem::canonical(&config.mcp.project_root) {
+        aliases.push((root.display().to_string(), "<project>".to_string()));
+    }
+    aliases.push((
+        config.mcp.project_root.display().to_string(),
+        "<project>".to_string(),
+    ));
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        aliases.push((home.to_string_lossy().into_owned(), "<home>".to_string()));
+    }
+    aliases
+}
+
+/// A running session: the agent plus its trace file.
+pub struct Session {
+    pub agent: Agent<AnthropicClient>,
+    pub tracer: Tracer,
+    pub console: ConsoleObserver,
+}
+
+impl Session {
+    pub async fn run(&mut self, request: &str) -> TurnReport {
+        let observers = Fanout(vec![&self.console, &self.tracer]);
+        self.agent.run_turn(request, &observers).await
+    }
+
+    pub async fn close(self) {
+        self.tracer.session_end();
+        self.agent.shutdown().await;
+    }
+}
+
+/// Connects both MCP servers, discovers tools, opens the trace and builds the agent.
+pub async fn start_session(
+    config: &Config,
+    input: SharedStdin,
+    show_tokens: bool,
+) -> Result<Session> {
+    let redactor = agent_settings(config).redactor();
+    let tracer = Tracer::open(&config.trace_file, new_session_id(), redactor.clone())
+        .with_context(|| {
+            format!(
+                "could not open the trace file {}",
+                config.trace_file.display()
+            )
+        })?;
+
     println!("Starting MCP servers...");
     let servers = ServerSet::connect_all(&config.mcp).await;
     for s in servers.discovered() {
@@ -149,6 +237,10 @@ pub async fn start_agent(config: &Config) -> Result<Agent<AnthropicClient>> {
         println!("  [!!] {name}: unavailable - {reason}");
     }
     if servers.is_empty() {
+        tracer.record(
+            "session_start",
+            json!({"error": "no MCP server could be started"}),
+        );
         servers.shutdown().await;
         bail!("no MCP server could be started; run `agent-client check-mcp` for details");
     }
@@ -164,7 +256,7 @@ pub async fn start_agent(config: &Config) -> Result<Agent<AnthropicClient>> {
         agent_settings(config),
         servers,
         &config.mcp.ops_reference_time,
-        Box::new(DeferredApprover),
+        Box::new(ConsoleApprover::new(input)),
     );
     let reg = agent.registry();
     let read_only = reg
@@ -176,13 +268,37 @@ pub async fn start_agent(config: &Config) -> Result<Agent<AnthropicClient>> {
         .filter(|t| t.permission == Permission::RequiresApproval)
         .count();
     println!(
-        "Discovered {} tools for Claude ({read_only} read-only, {approval} need approval; {} excluded by policy). Model: {}, effort {}.",
+        "Discovered {} tools for Claude ({read_only} read-only, {approval} need approval; {} excluded by policy). Model: {}, effort {}, max {} steps per request.",
         reg.len(),
         reg.excluded.len(),
         config.model,
-        config.effort
+        config.effort,
+        config.max_iterations
     );
-    Ok(agent)
+    println!(
+        "Trace file: {} (session {})",
+        tracer.path().display(),
+        tracer.session_id()
+    );
+
+    tracer.session_start(json!({
+        "model": config.model,
+        "effort": config.effort.to_string(),
+        "max_iterations": config.max_iterations,
+        "tool_timeout_ms": config.mcp.tool_timeout.as_millis() as u64,
+        "servers": agent.servers().discovered().iter().map(|s| json!({"name": s.name, "label": s.label})).collect::<Vec<_>>(),
+        "unavailable": agent.servers().unavailable().iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
+        "tools": reg.iter().map(|t| json!({"name": t.name, "server": t.server, "permission": t.permission.to_string()})).collect::<Vec<_>>(),
+        "excluded": reg.excluded.iter().map(|(n, r)| json!({"name": n, "reason": r})).collect::<Vec<_>>(),
+    }));
+    Ok(Session {
+        agent,
+        tracer,
+        console: ConsoleObserver {
+            show_tokens,
+            redactor,
+        },
+    })
 }
 
 fn print_tools(agent: &Agent<AnthropicClient>) {
@@ -224,7 +340,7 @@ fn print_report(report: &TurnReport) {
         }
         TurnOutcome::IterationLimit(max) => {
             println!(
-                "  [stopped after {max} model calls (MAX_ITERATIONS). Ask a follow-up to continue. {stats}]"
+                "  [stopped safely after {max} model calls (MAX_ITERATIONS). Ask a follow-up to continue. {stats}]"
             )
         }
         TurnOutcome::Failed(error) => {
@@ -236,47 +352,42 @@ fn print_report(report: &TurnReport) {
 /// `agent-client`: the interactive session.
 pub async fn interactive(config: &Config) -> Result<()> {
     println!("Incident Triage & Release Readiness Agent");
-    let mut agent = start_agent(config).await?;
-    let observer = ConsoleObserver { show_tokens: false };
+    let input = SharedStdin::new();
+    let mut session = start_session(config, input.clone(), false).await?;
     println!("\n{HELP}");
 
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     loop {
         print!("\nyou> ");
         let _ = std::io::stdout().flush();
         let line = tokio::select! {
-            line = lines.next_line() => line,
+            line = input.read_line() => line,
             _ = tokio::signal::ctrl_c() => { println!(); break; }
         };
-        let line = match line {
-            Ok(Some(line)) => line,
-            Ok(None) => break, // end of input
-            Err(err) => {
-                eprintln!("could not read input: {err}");
-                break;
-            }
-        };
-        let input = line.trim();
-        match input {
+        let Some(line) = line else { break }; // end of input
+        match line.trim() {
             "" => continue,
             "/exit" | "/quit" => break,
             "/help" => println!("{HELP}"),
-            "/tools" => print_tools(&agent),
-            "/servers" => print_servers(&agent),
+            "/tools" => print_tools(&session.agent),
+            "/servers" => print_servers(&session.agent),
             "/reset" => {
-                agent.reset();
+                session.agent.reset();
                 println!("Conversation cleared.");
             }
             cmd if cmd.starts_with('/') => println!("Unknown command {cmd}. Type /help."),
             request => {
                 let report = tokio::select! {
-                    report = agent.run_turn(request, &observer) => Some(report),
+                    report = session.run(request) => Some(report),
                     _ = tokio::signal::ctrl_c() => None,
                 };
                 match report {
                     Some(report) => print_report(&report),
                     None => {
-                        agent.recover_interrupted();
+                        session.agent.recover_interrupted();
+                        session.tracer.record(
+                            "warning",
+                            json!({"message": "request cancelled by the user (Ctrl+C)"}),
+                        );
                         println!("\n  [cancelled; the partial request was discarded]");
                     }
                 }
@@ -284,19 +395,18 @@ pub async fn interactive(config: &Config) -> Result<()> {
         }
     }
     println!("Shutting down MCP servers...");
-    agent.shutdown().await;
+    session.close().await;
     println!("Bye.");
     Ok(())
 }
 
 /// `agent-client ask "..."`: one request, then exit. Returns true if answered.
+/// Approval questions are still asked on the console.
 pub async fn ask(config: &Config, question: &str) -> Result<bool> {
-    let mut agent = start_agent(config).await?;
+    let mut session = start_session(config, SharedStdin::new(), true).await?;
     println!("\nyou> {question}");
-    let report = agent
-        .run_turn(question, &ConsoleObserver { show_tokens: true })
-        .await;
+    let report = session.run(question).await;
     print_report(&report);
-    agent.shutdown().await;
+    session.close().await;
     Ok(matches!(report.outcome, TurnOutcome::Answered(_)))
 }

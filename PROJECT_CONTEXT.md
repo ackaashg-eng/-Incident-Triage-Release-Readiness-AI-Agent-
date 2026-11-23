@@ -18,12 +18,20 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | 3 | Custom telemetry MCP server | COMPLETE (approved 2026-11-23) |
 | 4 | Filesystem MCP integration | COMPLETE (approved 2026-11-23) |
 | 5 | Multi-server agent orchestrator | COMPLETE (approved 2026-11-24; live Claude run deferred until the account has credits) |
-| 6 | Guardrails & security | IN PROGRESS |
-| 7 | Evaluation & testing | NOT STARTED |
+| 6 | Guardrails & security | COMPLETE (approved 2026-11-24) |
+| 7 | Evaluation & testing | IN PROGRESS |
 | 8 | Documentation & submission | NOT STARTED |
 
-**Current phase:** 6, IN PROGRESS (approved to start 2026-11-24).
-**Next approved action:** guardrails and security. Phase 7 starts only after the user approves Phase 6.
+**Current phase:** 7, IN PROGRESS (approved to start 2026-11-24).
+**Next approved action:** evaluation suite. Phase 8 starts only after the user approves Phase 7.
+
+## Phase 6 summary (guardrails)
+- Policy (`agent/registry.rs`): explicit `READ_ONLY_POLICY` (2 telemetry + 10 files tools; + generated read_resource) and `APPROVAL_REQUIRED` (create_incident_ticket); anything else blocked; server annotation can only make stricter (conflict → blocked).
+- Approval (`agent/approval.rs`): `Proposal` with SHA-256 of `server\ntool\ncanonical JSON`; `ConsoleApprover` (a/r/e, edit → fresh approval, invalid edit can't be approved, EOF = reject) reading the shared stdin (`SharedStdin`, also used by the REPL); `ScriptedApprover` (Approve/Reject/EditThenApprove/Tamper) for tests and evals; `DeferredApprover`. Runner re-hashes before executing → `payload_mismatch_blocked`.
+- `safety/injection.rs` (phrase rules → flags; `<tool_output … trust="untrusted-data">` wrapper with SECURITY WARNING; closing-tag neutralised), `safety/redact.rs` (exact key, token patterns, PEM, Bearer, password=, sensitive JSON keys, local paths → `<project>`/`<home>`).
+- `trace.rs`: JSONL `traces/agent_traces.jsonl` (events session_start, user_request, model_call, approval, tool_call, warning, turn_end, session_end; every line redacted). `ToolCallRecord` with status + approval enums.
+- Per-tool timeouts `TOOL_TIMEOUT_OVERRIDES`; `ServerSet::from_connections`; test fixture `tests/fixtures/misbehaving_mcp_server.js`.
+- Docs: `docs/SECURITY.md` (threats, layers, policy, flow, tests table); sample `traces/samples/phase6-scripted-security-demo.jsonl` (scripted model, labelled), regenerate with `cargo test -p agent-client --test security -- --ignored`.
 
 **Live-API verification deferred (user decision 2026-11-24):** the key in `.env` authenticates, but the Anthropic account has no credits (400 `credit balance is too low`, request req_011ChLMcWXwsVqGGtx9G8aTn). The user said: build on as if the key works. Every phase is verified offline (scripted Claude / local fake API). **Before submission (Phase 7/8), once credits exist:** run the live demo, `.\scripts\run.ps1 ask "Customers report failed payments since this morning. Investigate payments-api and open an incident ticket if warranted."`, and the evaluation suite. Grok/other providers: discussed, not adopted (master prompt mandates Claude; multi-provider support would be an optional later extension).
 
@@ -101,24 +109,30 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | Approval hand-off | `Approver` trait; Phase 5 `DeferredApprover` = shown, never executed | Phase 5 |
 | Child process group | MCP servers start with CREATE_NEW_PROCESS_GROUP so Ctrl+C cancels a request without killing them | Phase 5 |
 | Mode names | no args = interactive agent; foundation check moved to `agent-client config` | Phase 5 |
+| Permission source | application allow-list (not tool descriptions/annotations); annotations may only restrict | Phase 6 |
+| Approval binding | SHA-256(server, tool, canonical args); executed hash must equal approved hash | Phase 6 |
+| Approval input | console only (shared stdin); EOF = reject; edit → fresh approval | Phase 6 |
+| Tool output to Claude | redacted → injection-scanned → wrapped as untrusted-data (+ warning if flagged) | Phase 6 |
+| Trace | JSONL, append, every line redacted; tests use their own TRACE_FILE | Phase 6 |
 
 Full design: `docs/PHASE_0_DESIGN.md`.
 
-## Directory structure (actual, Phase 5)
+## Directory structure (actual, Phase 6)
 ```
 Cargo.toml  Cargo.lock  clippy.toml  package.json  package-lock.json  .npmrc
 .env.example  .gitignore  .gitattributes  .vscode/{extensions,settings}.json
 README.md  PROJECT_CONTEXT.md
 agent-client/  Cargo.toml  src/{lib,main,config,logging,check,cli}.rs
                src/mcp/{mod,connection,filesystem,telemetry,child_env,manager}.rs  src/llm/{mod,types,anthropic}.rs
-               src/agent/{mod,registry,validate,prompt,approval,runner}.rs
-               tests/{cli_smoke,cli_e2e,filesystem_mcp,agent_loop,anthropic_http}.rs  tests/common/mod.rs
+               src/agent/{mod,registry,validate,prompt,approval,runner}.rs  src/safety/{mod,injection,redact}.rs  src/trace.rs
+               tests/{cli_smoke,cli_e2e,filesystem_mcp,agent_loop,anthropic_http,security}.rs  tests/common/mod.rs  tests/fixtures/misbehaving_mcp_server.js
+traces/samples/phase6-scripted-security-demo.jsonl
 mcp-server/    Cargo.toml  src/{lib,main,config,logging,error,data,tickets,server}.rs
                tests/{startup,mock_data,mcp_protocol}.rs
 mock_data/     logs.json deployments.json release-checklist.md runbooks/*.md workspace/{RELEASE_NOTES.md,service-config.yaml}
 data/.gitkeep   evals/results/.gitkeep   traces/samples/.gitkeep
 scripts/{setup,run,demo-mcp}.ps1
-docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/learning/phase-{0,1,2,3,4,5}.md
+docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/SECURITY.md  docs/learning/phase-{0,1,2,3,4,5,6}.md
 .env (local only, placeholder key; git-ignored)
 ```
 
@@ -140,7 +154,7 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | Command | Result (2026-11-23) |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | 145 passed, 0 failed (Phase 5; run twice) |
+| `cargo test --workspace` | 185 passed, 0 failed, 1 ignored (Phase 6; run twice) |
 | `.\scripts\run.ps1 check-mcp` | all checks passed; no node.exe left running |
 | `cargo clippy --workspace --all-targets -- -D warnings` | OK, no warnings |
 | `cargo fmt --all -- --check` | OK |
@@ -153,6 +167,9 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | `node node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only "<abs>\mock_data\workspace"` | "Read-only mode" printed; the only allowed dir is `mock_data\workspace`; stdout empty |
 
 **Not verified by me:** the interactive key prompt in `setup.ps1` (needs a human at the keyboard and an API key, which the user doesn't have yet).
+
+## Test results (Phase 6, 2026-11-24)
+`cargo test --workspace`: **185 passed, 0 failed** (+1 ignored sample-trace writer), run twice; no leftover processes; real trace file untouched. clippy `-D warnings` + fmt clean. New: security.rs 14 (approved/rejected/edited/tampered tickets, invalid write payloads never reach the reviewer, injection in logs with a fooled model, injection + secrets in files, 10 traversal paths, unauthorized tools, default 8-iteration limit, hanging tool → timeout, server death → disconnected, API failure traced + rollback, trace fields + redaction); cli_e2e +3 (console approve / reject / EOF through the real binary); unit +22 (policy, approval incl. console edit flow, hash, injection rules incl. 'only log-0033 flagged', redaction incl. no false positives on mock data, trace format, timeouts parsing). Full mapping: docs/SECURITY.md §6.
 
 ## Test results (Phase 5, 2026-11-24)
 `cargo test --workspace`: **145 passed, 0 failed**, run twice; no node/telemetry processes left. clippy `-D warnings` + fmt clean. agent-client: 37 unit, 8 agent_loop, 8 anthropic_http, 4 cli_e2e, 7 cli_smoke, 15 filesystem_mcp; mcp-server 66.
@@ -190,7 +207,7 @@ One defect found and fixed during the phase: the notification-worker runbook lac
 - Live-only unknowns until the key exists: acceptance of the `thinking-display-updates` beta (switch off with `ANTHROPIC_PROGRESS_UPDATES=off` if a 400 names it) and real token/latency numbers.
 - GitHub repo: the user provides the URL in Phase 8.
 - Resolved in Phase 3: rmcp 3.11.0 compile probe passed; `OPS_REFERENCE_TIME` validated at server start.
-- Error messages from the filesystem server contain absolute paths (user folder); consider shortening in Phase 6.
+- Resolved in Phase 6: absolute paths in tool output/traces are shown as `<project>`/`<home>`.
 - Phase 5 must relay both error forms to Claude: tool results with `isError: true`, and JSON-RPC errors from `resources/read` (body in `error.data`).
 
 ## Security considerations

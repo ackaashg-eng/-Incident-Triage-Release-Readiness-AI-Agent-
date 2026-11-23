@@ -9,109 +9,19 @@
 
 mod common;
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use agent_client::agent::approval::DeferredApprover;
-use agent_client::agent::{Agent, AgentEvent, AgentSettings, NoopObserver, Observer, TurnOutcome};
-use agent_client::config::{Effort, McpSettings};
-use agent_client::llm::{LlmClient, LlmError, MessageResponse, MessagesRequest};
-use agent_client::mcp::manager::ServerSet;
-use common::{message, project_root};
+use agent_client::agent::{Agent, NoopObserver, TurnOutcome};
+use agent_client::llm::{LlmError, MessagesRequest};
+use common::{Recorder, ScriptedLlm, build_agent, message, tool_use};
 use serde_json::{Value, json};
-
-#[derive(Clone, Default)]
-struct ScriptedLlm {
-    replies: Arc<Mutex<VecDeque<Result<MessageResponse, LlmError>>>>,
-    requests: Arc<Mutex<Vec<MessagesRequest>>>,
-}
-
-impl ScriptedLlm {
-    fn new(replies: Vec<Result<Value, LlmError>>) -> Self {
-        let replies = replies
-            .into_iter()
-            .map(|r| r.map(|v| serde_json::from_value(v).unwrap()))
-            .collect();
-        Self {
-            replies: Arc::new(Mutex::new(replies)),
-            requests: Arc::default(),
-        }
-    }
-
-    fn requests(&self) -> Vec<MessagesRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-impl LlmClient for ScriptedLlm {
-    async fn send(&self, request: &MessagesRequest) -> Result<MessageResponse, LlmError> {
-        self.requests.lock().unwrap().push(request.clone());
-        self.replies
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| Err(LlmError::Malformed("script ended".into())))
-    }
-}
-
-/// Records events for assertions.
-#[derive(Default)]
-struct Recorder(Mutex<Vec<String>>);
-
-impl Observer for Recorder {
-    fn on_event(&self, event: &AgentEvent<'_>) {
-        let line = match event {
-            AgentEvent::ToolStart { name, .. } => format!("start {name}"),
-            AgentEvent::ToolEnd { name, ok, .. } => format!("end {name} {ok}"),
-            AgentEvent::Proposal { proposal, .. } => format!("proposal {}", proposal.tool),
-            AgentEvent::Note(n) => format!("note {n}"),
-            AgentEvent::Warning(w) => format!("warning {w}"),
-            _ => return,
-        };
-        self.0.lock().unwrap().push(line);
-    }
-}
-
-fn tool_use(id: &str, name: &str, input: Value) -> Value {
-    json!({"type": "tool_use", "id": id, "name": name, "input": input})
-}
-
-/// MCP settings pointing at the real servers, with a throw-away ticket DB.
-fn settings(tickets: &std::path::Path) -> McpSettings {
-    let mut s = McpSettings::from_lookup(&project_root(), &|_: &str| None).unwrap();
-    s.tickets_db = tickets.to_path_buf();
-    s
-}
 
 async fn agent(
     llm: ScriptedLlm,
     tickets: &std::path::Path,
     max_iterations: u32,
 ) -> Agent<ScriptedLlm> {
-    let servers = ServerSet::connect_all(&settings(tickets)).await;
-    assert!(
-        servers.unavailable().is_empty(),
-        "{:?}",
-        servers.unavailable()
-    );
-    Agent::new(
-        llm,
-        AgentSettings {
-            model: "claude-opus-5-5".into(),
-            effort: Effort::Medium,
-            fallbacks: true,
-            progress_updates: true,
-            max_iterations,
-            max_tokens: 16_000,
-            tool_timeout: Duration::from_secs(10),
-        },
-        servers,
-        "2026-11-20T12:00:00Z",
-        Box::new(DeferredApprover),
-    )
+    build_agent(llm, tickets, max_iterations, Box::new(DeferredApprover)).await
 }
-
 /// The tool_result blocks of a request's last message, by tool_use_id.
 fn results(request: &MessagesRequest) -> Vec<(String, String, bool)> {
     let last = request.messages.last().unwrap();
@@ -263,7 +173,9 @@ async fn a_multi_step_investigation_runs_end_to_end() {
     assert!(
         r3[1].1.contains("2.14.0")
             && r3[1].1.contains("Load test: **skipped**")
-            && r3[1].1.starts_with("# Release Notes"),
+            && r3[1]
+                .1
+                .contains("<tool_output tool=\"files__read_text_file\""),
         "{}",
         r3[1].1
     );
@@ -357,7 +269,7 @@ async fn unknown_tools_invalid_arguments_and_tool_failures_go_back_to_claude() {
     assert!(r.iter().all(|(_, _, is_error)| *is_error), "{r:#?}");
     let text = |i: usize| r[i].1.as_str();
     assert!(
-        text(0).contains("Unknown tool `telemetry__delete_logs`"),
+        text(0).contains("Unknown or unauthorized tool `telemetry__delete_logs`"),
         "{}",
         text(0)
     );

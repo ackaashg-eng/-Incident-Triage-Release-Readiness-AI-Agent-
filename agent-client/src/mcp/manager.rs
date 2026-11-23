@@ -49,6 +49,19 @@ impl ServerSet {
         set
     }
 
+    /// A set built from connections that are already open (tests, custom servers).
+    pub async fn from_connections(connections: Vec<McpConnection>, timeout: Duration) -> Self {
+        let mut set = Self {
+            connections: Vec::new(),
+            discovered: Vec::new(),
+            unavailable: Vec::new(),
+        };
+        for conn in connections {
+            set.add(conn, timeout).await;
+        }
+        set
+    }
+
     async fn add(&mut self, conn: McpConnection, timeout: Duration) {
         match discover(&conn, timeout).await {
             Ok(found) => {

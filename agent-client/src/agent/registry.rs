@@ -10,10 +10,13 @@
 //!   and an **adapted schema** for the Anthropic API;
 //! * a **permission class** (read-only / requires approval / blocked).
 //!
-//! Nothing here is hard-coded per tool except the short policy list of write
-//! tools that need human approval. Anything that is neither annotated
-//! read-only nor on that list is **blocked** (fail closed) and never shown to
-//! Claude.
+//! **Permissions come from a trusted, application-side policy** (the two
+//! tables below), not from what a server says about its own tools: a server
+//! could describe a destructive tool as harmless. A tool must be on the
+//! read-only or the approval list to be offered to Claude; anything else is
+//! **blocked** (fail closed). Server annotations can only make things stricter:
+//! a policy-read-only tool that the server marks `readOnlyHint: false` is
+//! blocked as a conflict. Resource reads are read-only by MCP definition.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -25,7 +28,22 @@ use crate::llm::ToolDefinition;
 
 /// Separator between server and tool name in what Claude sees.
 pub const NAMESPACE_SEP: &str = "__";
-/// Write tools that may run only after a human approves the exact call.
+/// Tools that only read: they run without asking.
+pub const READ_ONLY_POLICY: [(&str, &str); 12] = [
+    ("telemetry", "search_logs"),
+    ("telemetry", "get_deployment_history"),
+    ("files", "read_text_file"),
+    ("files", "read_file"),
+    ("files", "read_media_file"),
+    ("files", "read_multiple_files"),
+    ("files", "list_directory"),
+    ("files", "list_directory_with_sizes"),
+    ("files", "directory_tree"),
+    ("files", "search_files"),
+    ("files", "get_file_info"),
+    ("files", "list_allowed_directories"),
+];
+/// State-changing tools: they run only after a human approves the exact payload.
 pub const APPROVAL_REQUIRED: [(&str, &str); 1] = [("telemetry", "create_incident_ticket")];
 const READ_RESOURCE: &str = "read_resource";
 
@@ -107,14 +125,13 @@ impl ToolRegistry {
 
     fn add_mcp_tool(&mut self, server: &'static str, tool: &Tool) {
         let name = format!("{server}{NAMESPACE_SEP}{}", tool.name);
-        let permission = classify(server, tool);
-        if permission == Permission::Blocked {
-            self.excluded.push((
-                name,
-                "not annotated read-only and not an approved write tool".into(),
-            ));
-            return;
-        }
+        let permission = match classify(server, tool) {
+            Ok(p) => p,
+            Err(reason) => {
+                self.excluded.push((name, reason));
+                return;
+            }
+        };
         if let Err(reason) = valid_tool_name(&name) {
             self.excluded.push((name, reason));
             return;
@@ -239,19 +256,22 @@ impl ToolRegistry {
     }
 }
 
-fn classify(server: &str, tool: &Tool) -> Permission {
-    if APPROVAL_REQUIRED
-        .iter()
-        .any(|(s, t)| *s == server && *t == tool.name)
-    {
-        Permission::RequiresApproval
-    } else if tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true) {
-        Permission::ReadOnly
+/// The application policy. `Err(reason)` = blocked.
+pub fn classify(server: &str, tool: &Tool) -> Result<Permission, String> {
+    let listed = |list: &[(&str, &str)]| list.iter().any(|(s, t)| *s == server && *t == tool.name);
+    let server_says_read_only = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
+    if listed(&APPROVAL_REQUIRED) {
+        Ok(Permission::RequiresApproval)
+    } else if listed(&READ_ONLY_POLICY) {
+        if server_says_read_only == Some(false) {
+            Err("policy says read-only but the server marks it as writing (conflict)".into())
+        } else {
+            Ok(Permission::ReadOnly)
+        }
     } else {
-        Permission::Blocked
+        Err("not in the application's tool policy".into())
     }
 }
-
 /// Claude tool names: letters, digits, `_` and `-`, at most 64 characters.
 fn valid_tool_name(name: &str) -> Result<(), String> {
     if !name.is_empty()
@@ -479,6 +499,49 @@ mod tests {
         ] {
             assert!(!ok(bad), "{bad}");
         }
+    }
+
+    /// The policy is the application's, not the server's: a server cannot
+    /// promote a tool by calling it read-only, but it can make one stricter.
+    #[test]
+    fn the_application_policy_decides_not_the_server() {
+        let empty = json!({"type": "object"});
+        let c = |server: &str, name: &str, ro: Option<bool>| {
+            classify(server, &tool(name, ro, empty.clone()))
+        };
+        assert_eq!(
+            c("telemetry", "search_logs", Some(true)),
+            Ok(Permission::ReadOnly)
+        );
+        assert_eq!(
+            c("telemetry", "search_logs", None),
+            Ok(Permission::ReadOnly),
+            "no annotation needed"
+        );
+        assert!(
+            c("telemetry", "search_logs", Some(false))
+                .unwrap_err()
+                .contains("conflict")
+        );
+        assert_eq!(
+            c("telemetry", "create_incident_ticket", Some(true)),
+            Ok(Permission::RequiresApproval),
+            "a server can't downgrade a write"
+        );
+        assert!(
+            c("telemetry", "delete_everything", Some(true))
+                .unwrap_err()
+                .contains("not in the application's tool policy")
+        );
+        assert!(
+            c("files", "write_file", Some(true)).is_err(),
+            "a lying annotation does not help"
+        );
+        assert!(
+            c("files", "search_logs", Some(true)).is_err(),
+            "policy is per server"
+        );
+        assert!(c("telemetry", "read_text_file", Some(true)).is_err());
     }
 
     #[test]

@@ -18,6 +18,7 @@ fn agent_command(fake: &FakeAnthropic, tickets: &std::path::Path) -> tokio::proc
         .env("ANTHROPIC_API_KEY", "sk-ant-test-SECRET123")
         .env("ANTHROPIC_BASE_URL", &fake.url)
         .env("TICKETS_DB", tickets)
+        .env("TRACE_FILE", tickets.with_extension("traces.jsonl"))
         .env("LOG_LEVEL", "warn")
         .env_remove("RUST_LOG")
         .stdout(Stdio::piped())
@@ -204,4 +205,79 @@ async fn the_ask_mode_needs_a_question() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage: agent-client"));
+}
+
+/// The approval gate through the real binary: the reviewer types at the console.
+async fn ticket_flow(console_input: &'static [u8]) -> (String, tempfile::TempDir, String) {
+    let fake = FakeAnthropic::start(vec![
+        Reply::json(message("tool_use", json!([
+            {"type": "tool_use", "id": "t1", "name": "telemetry__create_incident_ticket", "input": {
+                "title": "payments-api checkout failures after 2.14.0", "severity": "CRITICAL",
+                "summary": "Gateway timeouts since 09:12 UTC after deploy dep-1048 (2.14.0).",
+                "assignee": "payments-oncall"}}
+        ]))),
+        Reply::json(message("end_turn", json!([{"type": "text", "text": "Done."}]))),
+    ])
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("tickets.db");
+    let mut child = agent_command(&fake, &db)
+        .args(["ask", "open a ticket for the payments outage"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(console_input).await.unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().await.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let trace = std::fs::read_to_string(db.with_extension("traces.jsonl")).unwrap_or_default();
+    (stdout, tmp, trace)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn console_approval_creates_the_ticket() {
+    let (stdout, tmp, trace) = ticket_flow(b"a\n").await;
+    for expected in [
+        "APPROVAL REQUIRED",
+        "\"assignee\": \"payments-oncall\"",
+        "Payload SHA-256: ",
+        "[STATE-CHANGING: needs your approval]",
+        ">> APPROVED - executing exactly the payload shown",
+        "ticket INC-1001 created",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in:\n{stdout}"
+        );
+    }
+    assert!(tmp.path().join("tickets.db").exists());
+    assert!(
+        trace.contains("\"decision\":\"approved\"") && trace.contains("\"approval\":\"approved\""),
+        "{trace}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn console_rejection_creates_nothing() {
+    let (stdout, tmp, trace) = ticket_flow(b"r\nwrong service\n").await;
+    assert!(
+        stdout.contains(">> REJECTED (wrong service) - nothing was executed"),
+        "{stdout}"
+    );
+    assert!(
+        !tmp.path().join("tickets.db").exists(),
+        "the telemetry server never received the call"
+    );
+    assert!(
+        trace.contains("\"decision\":\"rejected\"") && trace.contains("\"status\":\"rejected\""),
+        "{trace}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_console_input_means_no_approval() {
+    let (stdout, tmp, _) = ticket_flow(b"").await;
+    assert!(stdout.contains("treated as REJECTED"), "{stdout}");
+    assert!(!tmp.path().join("tickets.db").exists());
 }
