@@ -11,14 +11,21 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# MCP server side: tool macros, JSON-schema generation, stdio transport.
+rmcp = { workspace = true, features = ["server", "macros", "schemars", "transport-io"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# Mock-data validation (tests/mock_data.rs). serde_json and chrono become
-# regular dependencies in Phase 3; yaml-rust2 stays test-only.
-serde_json.workspace = true
-chrono.workspace = true
-yaml-rust2.workspace = true
+yaml-rust2.workspace = true   # mock-data validation only (tests/mock_data.rs)
+# MCP-level integration tests start the real binary and talk to it as a client.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process"] }
 
 [lints]
 workspace = true

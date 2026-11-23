@@ -73,6 +73,31 @@ This builds anything that changed and starts the agent from the project folder. 
 
 ---
 
+## The telemetry MCP server (`ops-telemetry-mcp`)
+
+A standalone MCP server (stdio transport, official Rust SDK `rmcp`). Any MCP client can use it; the agent is just one client.
+
+| Kind | Name | What it does |
+|---|---|---|
+| Tool (read-only) | `search_logs(service_name, severity?, limit?)` | Logs of one service, newest first; severity INFO/WARN/ERROR/FATAL (omit = all); limit 1–100 (default 20) |
+| Tool (read-only) | `get_deployment_history(service_name, window_hours)` | Deployments/rollbacks in the last 1–720 h: version, commit, timestamp, rollback status |
+| Tool (**write**) | `create_incident_ticket(title, severity, summary, assignee)` | Validates and stores a ticket in SQLite (`data\tickets.db`); returns `INC-NNNN` + timestamp |
+| Resource | `service://runbooks/{service_name}` | Runbook: troubleshooting steps and escalation rules |
+| Resource | `config://release-checklist` | Mandatory release criteria RC-1…RC-9 |
+
+Valid services: `auth-service`, `payments-api`, `notification-worker`. Errors come back as `{"error": {"code", "message", "hint", "valid_values", "field_errors"}}`; the server never crashes on a bad request.
+
+See it speak raw MCP (no API key needed):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\demo-mcp.ps1        # one summary line per response
+powershell -ExecutionPolicy Bypass -File .\scripts\demo-mcp.ps1 -Raw   # the exact JSON-RPC messages
+```
+
+The demo writes tickets to `data\demo-tickets.db`, not the real store.
+
+---
+
 ## Development commands
 
 Run from the project folder:
@@ -95,7 +120,7 @@ mock_data/      simulated logs, deployments, runbooks, workspace files   (Phase 
 data/           runtime SQLite ticket store            (git-ignored contents)
 traces/         agent_traces.jsonl (git-ignored) + samples/ for submission
 evals/          benchmark prompts and results           (Phase 7)
-scripts/        setup.ps1, run.ps1
+scripts/        setup.ps1, run.ps1, demo-mcp.ps1
 docs/           design + per-phase learning notes
 ```
 
