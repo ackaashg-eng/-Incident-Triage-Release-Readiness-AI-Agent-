@@ -12,6 +12,10 @@ thiserror.workspace = true
 dotenvy.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# MCP client side: spawn servers as child processes and talk over stdio.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync"] }
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

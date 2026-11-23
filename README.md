@@ -60,6 +60,8 @@ All settings live in `.env` (git-ignored). `.env.example` documents each one wit
 | `TOOL_TIMEOUT_SECS` | `10` | Per-tool timeout (1–300) |
 | `OPS_REFERENCE_TIME` | `2026-11-20T12:00:00Z` | "Now" for the simulated data (`now` = real clock) |
 | `LOG_LEVEL` | `warn` | Diagnostics on stderr (`RUST_LOG` overrides) |
+| `MCP_STARTUP_TIMEOUT_SECS` | `20` | Time a server may take to start (1–120) |
+| `NODE_EXE` | `node` | Node.js executable for the filesystem server |
 
 ---
 
@@ -95,6 +97,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\demo-mcp.ps1 -Raw   # the exa
 ```
 
 The demo writes tickets to `data\demo-tickets.db`, not the real store.
+
+---
+
+## The filesystem MCP server (external)
+
+The official `@modelcontextprotocol/server-filesystem` 2.4.0 (installed by `npm ci`) runs unchanged as a separate Node process, **read-only** and confined to `mock_data\workspace` (which holds only `RELEASE_NOTES.md` and `service-config.yaml`). It is launched with a scrubbed environment, so it never sees your API key. Details and test documentation: [docs/FILESYSTEM_MCP.md](docs/FILESYSTEM_MCP.md).
+
+Check both MCP servers end to end (starts them, discovers tools, reads the files, tries to escape the workspace, shuts down; no API key needed):
+
+```powershell
+.\scripts\run.ps1 check-mcp
+```
 
 ---
 

@@ -104,6 +104,40 @@ fn env_example_parses_and_contains_only_the_placeholder() {
     );
 }
 
+/// `check-mcp` against the real servers, from the real project folder,
+/// without any API key.
+#[test]
+fn check_mcp_passes_in_the_project_folder_without_a_key() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let out = Command::new(env!("CARGO_BIN_EXE_agent-client"))
+        .arg("check-mcp")
+        .current_dir(&root)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("failed to run agent-client check-mcp");
+    let stdout = text(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stdout: {stdout}\nstderr: {}",
+        text(&out.stderr)
+    );
+    assert!(stdout.contains("All checks passed."), "stdout: {stdout}");
+    assert!(!stdout.contains("[FAIL]"), "stdout: {stdout}");
+}
+
+#[test]
+fn unknown_arguments_show_the_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_agent-client"))
+        .arg("--frobnicate")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("usage: agent-client"));
+}
+
 #[test]
 fn invalid_setting_is_reported_with_its_name() {
     let dir = tempfile::tempdir().unwrap();

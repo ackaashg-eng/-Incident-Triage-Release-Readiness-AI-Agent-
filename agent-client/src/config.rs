@@ -21,6 +21,7 @@ const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_MAX_ITERATIONS: u32 = 8;
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_LOG_LEVEL: &str = "warn";
+const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 20;
 
 /// Everything that can be wrong with the configuration.
 /// Each message tells the user how to fix it.
@@ -121,13 +122,8 @@ pub struct Config {
     pub fallbacks: bool,
     /// Maximum Claude calls per user request.
     pub max_iterations: u32,
-    /// Default per-tool execution timeout.
-    pub tool_timeout: Duration,
-    /// Passed through to the telemetry server ("now" for time windows).
-    pub ops_reference_time: String,
-    pub telemetry_server_path: PathBuf,
-    /// The only directory the filesystem MCP server may read.
-    pub filesystem_root: PathBuf,
+    /// How to launch and talk to the two MCP servers.
+    pub mcp: McpSettings,
     pub trace_file: PathBuf,
     pub log_level: String,
 }
@@ -145,6 +141,7 @@ impl Config {
         base_dir: &Path,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, ConfigError> {
+        let lookup = &lookup as &dyn Fn(&str) -> Option<String>;
         // Treat empty / whitespace-only values the same as "not set".
         let get = |name: &str| {
             lookup(name)
@@ -179,17 +176,7 @@ impl Config {
             1..=50,
         )?;
 
-        let tool_timeout_secs = parse_number(
-            "TOOL_TIMEOUT_SECS",
-            get("TOOL_TIMEOUT_SECS"),
-            DEFAULT_TOOL_TIMEOUT_SECS,
-            1..=300,
-        )?;
-
-        let path = |name: &str, default: &str| {
-            let raw = get(name).unwrap_or_else(|| default.to_string());
-            resolve(base_dir, &raw)
-        };
+        let mcp = McpSettings::from_lookup(base_dir, lookup)?;
 
         Ok(Self {
             api_key,
@@ -197,18 +184,96 @@ impl Config {
             effort,
             fallbacks,
             max_iterations,
+            mcp,
+            trace_file: resolve(
+                base_dir,
+                &get("TRACE_FILE").unwrap_or_else(|| r"traces\agent_traces.jsonl".to_string()),
+            ),
+            log_level: log_level(lookup),
+        })
+    }
+}
+
+/// Settings for launching the MCP servers. They need no API key, so the
+/// `check-mcp` command can use them on their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSettings {
+    /// The project folder; servers are confined relative to it.
+    pub project_root: PathBuf,
+    /// Default timeout for one tool call / resource read.
+    pub tool_timeout: Duration,
+    /// How long a server may take to start and complete the MCP handshake.
+    pub startup_timeout: Duration,
+    /// Passed through to the telemetry server ("now" for time windows).
+    pub ops_reference_time: String,
+    pub telemetry_server_path: PathBuf,
+    /// The Node.js executable (`node` = found on PATH).
+    pub node_exe: PathBuf,
+    /// Entry script of `@modelcontextprotocol/server-filesystem`.
+    pub filesystem_server_script: PathBuf,
+    /// The only directory the filesystem MCP server may read.
+    pub filesystem_root: PathBuf,
+}
+
+impl McpSettings {
+    /// Load `.env` (if present), then read the process environment.
+    pub fn load(base_dir: &Path) -> Result<Self, ConfigError> {
+        load_dotenv(base_dir)?;
+        Self::from_lookup(base_dir, &|name: &str| std::env::var(name).ok())
+    }
+
+    pub fn from_lookup(
+        base_dir: &Path,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        let get = |name: &str| {
+            lookup(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let path = |name: &str, default: &str| {
+            resolve(base_dir, &get(name).unwrap_or_else(|| default.to_string()))
+        };
+        let tool_timeout_secs = parse_number(
+            "TOOL_TIMEOUT_SECS",
+            get("TOOL_TIMEOUT_SECS"),
+            DEFAULT_TOOL_TIMEOUT_SECS,
+            1..=300,
+        )?;
+        let startup_timeout_secs = parse_number(
+            "MCP_STARTUP_TIMEOUT_SECS",
+            get("MCP_STARTUP_TIMEOUT_SECS"),
+            DEFAULT_STARTUP_TIMEOUT_SECS,
+            1..=120,
+        )?;
+
+        Ok(Self {
+            project_root: base_dir.to_path_buf(),
             tool_timeout: Duration::from_secs(tool_timeout_secs),
+            startup_timeout: Duration::from_secs(startup_timeout_secs),
             ops_reference_time: get("OPS_REFERENCE_TIME")
                 .unwrap_or_else(|| "2026-11-20T12:00:00Z".to_string()),
             telemetry_server_path: path(
                 "TELEMETRY_SERVER_PATH",
                 r"target\debug\ops-telemetry-mcp.exe",
             ),
+            // A bare program name is looked up on PATH, so it is not joined to base_dir.
+            node_exe: PathBuf::from(get("NODE_EXE").unwrap_or_else(|| "node".to_string())),
+            filesystem_server_script: path(
+                "FILESYSTEM_SERVER_SCRIPT",
+                r"node_modules\@modelcontextprotocol\server-filesystem\dist\index.js",
+            ),
             filesystem_root: path("FILESYSTEM_ROOT", r"mock_data\workspace"),
-            trace_file: path("TRACE_FILE", r"traces\agent_traces.jsonl"),
-            log_level: get("LOG_LEVEL").unwrap_or_else(|| DEFAULT_LOG_LEVEL.to_string()),
         })
     }
+}
+
+/// `LOG_LEVEL` (default `warn`); shared by the agent and `check-mcp`.
+pub fn log_level(lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    lookup("LOG_LEVEL")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_LOG_LEVEL.to_string())
 }
 
 /// Load `base_dir\.env` into the process environment if the file exists.
@@ -295,13 +360,34 @@ mod tests {
         assert_eq!(cfg.effort, Effort::Medium);
         assert!(cfg.fallbacks);
         assert_eq!(cfg.max_iterations, 8);
-        assert_eq!(cfg.tool_timeout, Duration::from_secs(10));
-        assert_eq!(cfg.ops_reference_time, "2026-11-20T12:00:00Z");
+        assert_eq!(cfg.mcp.tool_timeout, Duration::from_secs(10));
+        assert_eq!(cfg.mcp.startup_timeout, Duration::from_secs(20));
+        assert_eq!(cfg.mcp.ops_reference_time, "2026-11-20T12:00:00Z");
+        assert_eq!(cfg.mcp.node_exe, PathBuf::from("node"));
         assert_eq!(
-            cfg.filesystem_root,
+            cfg.mcp.filesystem_server_script,
+            Path::new(BASE)
+                .join(r"node_modules\@modelcontextprotocol\server-filesystem\dist\index.js")
+        );
+        assert_eq!(
+            cfg.mcp.filesystem_root,
             Path::new(BASE).join(r"mock_data\workspace")
         );
         assert_eq!(cfg.log_level, "warn");
+    }
+
+    #[test]
+    fn mcp_settings_need_no_api_key() {
+        let s = McpSettings::from_lookup(Path::new(BASE), &|k: &str| {
+            (k == "NODE_EXE").then(|| r"C:\tools\node.exe".to_string())
+        })
+        .unwrap();
+        assert_eq!(s.project_root, PathBuf::from(BASE));
+        assert_eq!(s.node_exe, PathBuf::from(r"C:\tools\node.exe"));
+        assert_eq!(
+            s.filesystem_root,
+            Path::new(BASE).join(r"mock_data\workspace")
+        );
     }
 
     #[test]
@@ -345,8 +431,11 @@ mod tests {
         assert_eq!(cfg.effort, Effort::High);
         assert!(!cfg.fallbacks);
         assert_eq!(cfg.max_iterations, 3);
-        assert_eq!(cfg.tool_timeout, Duration::from_secs(30));
-        assert_eq!(cfg.filesystem_root, PathBuf::from(r"D:\other\workspace"));
+        assert_eq!(cfg.mcp.tool_timeout, Duration::from_secs(30));
+        assert_eq!(
+            cfg.mcp.filesystem_root,
+            PathBuf::from(r"D:\other\workspace")
+        );
     }
 
     #[test]
@@ -357,6 +446,7 @@ mod tests {
             ("MAX_ITERATIONS", "0"),
             ("MAX_ITERATIONS", "eight"),
             ("TOOL_TIMEOUT_SECS", "-5"),
+            ("MCP_STARTUP_TIMEOUT_SECS", "0"),
         ];
         for (name, value) in cases {
             let err = load(&[("ANTHROPIC_API_KEY", "k"), (name, value)]).unwrap_err();

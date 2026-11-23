@@ -16,14 +16,20 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | 1 | Environment & project foundation | COMPLETE (approved 2026-11-23; API key deferred by the user) |
 | 2 | Mock data engineering | COMPLETE (approved 2026-11-23) |
 | 3 | Custom telemetry MCP server | COMPLETE (approved 2026-11-23) |
-| 4 | Filesystem MCP integration | IN PROGRESS |
-| 5 | Multi-server agent orchestrator | NOT STARTED |
+| 4 | Filesystem MCP integration | COMPLETE (approved 2026-11-23) |
+| 5 | Multi-server agent orchestrator | IN PROGRESS |
 | 6 | Guardrails & security | NOT STARTED |
 | 7 | Evaluation & testing | NOT STARTED |
 | 8 | Documentation & submission | NOT STARTED |
 
-**Current phase:** 4, IN PROGRESS (approved to start 2026-11-23).
-**Next approved action:** filesystem MCP integration. Phase 5 starts only after the user approves Phase 4.
+**Current phase:** 5, IN PROGRESS (approved to start 2026-11-23).
+**Next approved action:** build the agent orchestrator. Phase 6 starts only after the user approves Phase 5.
+
+## Phase 4 summary (filesystem MCP integration)
+- External server unchanged: `node <project>\node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only --confine-roots -- <project>\mock_data\workspace` (no npx; arguments as a list; cwd = workspace).
+- `agent-client` is now **lib + bin**. New `src/mcp/`: `connection.rs` (generic stdio client: spawn, handshake timeout, per-request timeout, stderr tail, `McpError` {Spawn, StartupTimeout, Handshake, Timeout, Disconnected, Rejected, Request, Unsafe}, shutdown), `filesystem.rs` (pre-launch workspace checks, post-connect verification: all tools readOnlyHint + exactly one allowed dir), `telemetry.rs` (launch of ops-telemetry-mcp with DATA_DIR/TICKETS_DB/OPS_REFERENCE_TIME), `child_env.rs` (env_clear + 17 allow-listed system vars; API key never reaches children). `src/check.rs` = `agent-client check-mcp`.
+- Config split: `McpSettings` (no API key needed) inside `Config.mcp`; new optional vars `MCP_STARTUP_TIMEOUT_SECS` (20), `NODE_EXE` (node), `FILESYSTEM_SERVER_SCRIPT`.
+- Docs: `docs/FILESYSTEM_MCP.md` (install/launch, controls, discovered capabilities, test documentation, limitations).
 
 ## Phase 3 summary (telemetry MCP server)
 - Crate `mcp-server` is now **lib + thin bin**: `lib.rs` (modules), `main.rs` (config → server → `rmcp::transport::stdio()`).
@@ -73,21 +79,26 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | Deployment window | include a deployment if it was deployed **or rolled back** inside the window; window 1–720 h | Phase 3 |
 | Data loading | files read per request (small); missing/malformed → structured error, no crash, no restart needed | Phase 3 |
 | Ticket time | `created_at` = real UTC clock (the reference time only anchors queries) | Phase 3 |
+| FS launch | `node` + locked local script (not npx); `--read-only --confine-roots --`; workspace only | Phase 4 |
+| Child env | every MCP server starts with `env_clear()` + system allow-list (no API key, no NODE_OPTIONS) | Phase 4 |
+| FS verification | fail closed: refuse if any tool lacks `readOnlyHint: true` or allowed dirs ≠ workspace; pre-launch scan refuses secrets/links in the workspace | Phase 4 |
+| `check-mcp` | `agent-client check-mcp` / `.\scripts\run.ps1 check-mcp` verifies both servers without an API key | Phase 4 |
 
 Full design: `docs/PHASE_0_DESIGN.md`.
 
-## Directory structure (actual, end of Phase 3)
+## Directory structure (actual, end of Phase 4)
 ```
 Cargo.toml  Cargo.lock  clippy.toml  package.json  package-lock.json  .npmrc
 .env.example  .gitignore  .gitattributes  .vscode/{extensions,settings}.json
 README.md  PROJECT_CONTEXT.md
-agent-client/  Cargo.toml  src/{main,config,logging}.rs  tests/cli_smoke.rs
+agent-client/  Cargo.toml  src/{lib,main,config,logging,check}.rs  src/mcp/{mod,connection,filesystem,telemetry,child_env}.rs
+               tests/{cli_smoke,filesystem_mcp}.rs
 mcp-server/    Cargo.toml  src/{lib,main,config,logging,error,data,tickets,server}.rs
                tests/{startup,mock_data,mcp_protocol}.rs
 mock_data/     logs.json deployments.json release-checklist.md runbooks/*.md workspace/{RELEASE_NOTES.md,service-config.yaml}
 data/.gitkeep   evals/results/.gitkeep   traces/samples/.gitkeep
 scripts/{setup,run,demo-mcp}.ps1
-docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/learning/phase-{0,1,2,3}.md
+docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/learning/phase-{0,1,2,3,4}.md
 .env (local only, placeholder key; git-ignored)
 ```
 
@@ -109,7 +120,8 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | Command | Result (2026-11-23) |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | 79 passed, 0 failed (Phase 3) |
+| `cargo test --workspace` | 104 passed, 0 failed (Phase 4; run twice) |
+| `.\scripts\run.ps1 check-mcp` | all checks passed; no node.exe left running |
 | `cargo clippy --workspace --all-targets -- -D warnings` | OK, no warnings |
 | `cargo fmt --all -- --check` | OK |
 | `powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -SkipKey` | exit 1 as expected: open item "Node 24+"; the build and `.env` creation worked |
@@ -121,6 +133,11 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | `node node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only "<abs>\mock_data\workspace"` | "Read-only mode" printed; the only allowed dir is `mock_data\workspace`; stdout empty |
 
 **Not verified by me:** the interactive key prompt in `setup.ps1` (needs a human at the keyboard and an API key, which the user doesn't have yet).
+
+## Test results (Phase 4, 2026-11-23)
+`cargo test --workspace`: **104 passed, 0 failed**, run twice. agent-client 16 unit + 7 cli_smoke + 15 filesystem_mcp; mcp-server 34 + 14 + 16 + 2. clippy `-D warnings` and fmt: clean.
+- filesystem_mcp (real Node server): startup/connection, exactly 10 read-only tools, `file://{+path}` template + empty resource list, allowed dir = workspace, both files read (relative, absolute with spaces, `file://` resource), 13 outside paths + 4 directory tools + outside resource all `Access denied`, 6 write tools "not found" and nothing written, missing file (ENOENT, connection still fine), shutdown (PID gone), `taskkill` → `Disconnected` fast, missing node.exe, missing package, unsafe workspace, non-MCP program (handshake error with stderr), silent program (startup timeout), scrubbed env.
+- Learned: the Node server omits `isError` on success (absent = success) → always test `== Some(true)`. Negotiated protocol 2025-11-25.
 
 ## Test results (Phase 3, 2026-11-23)
 `cargo test --workspace`: **79 passed, 0 failed**. agent-client 8 unit + 5 cli_smoke; mcp-server 34 unit + 14 mcp_protocol + 16 mock_data + 2 startup. clippy `-D warnings`: clean. `cargo fmt --check`: clean.
@@ -145,7 +162,8 @@ One defect found and fixed during the phase: the notification-worker runbook lac
 - **No API key yet** (the user will get one later). Everything up to Phase 4 works without it (tests need no key). It's needed for the first live agent run in Phase 5; then run `scripts\setup.ps1` (or `-ResetKey`).
 - GitHub repo: the user provides the URL in Phase 8.
 - Resolved in Phase 3: rmcp 3.11.0 compile probe passed; `OPS_REFERENCE_TIME` validated at server start.
+- Error messages from the filesystem server contain absolute paths (user folder); consider shortening in Phase 6.
 - Phase 5 must relay both error forms to Claude: tool results with `isError: true`, and JSON-RPC errors from `resources/read` (body in `error.data`).
 
 ## Security considerations
-Design §9. Phase 1 controls in place: `.env` ignored; `.env.example` placeholder-only (tested); key wrapped in `ApiKey` with redacting Debug/Display (tested incl. debug logs); hidden key entry in setup; `.npmrc` ignore-scripts + engine-strict; `unsafe_code` forbidden; stdout of the MCP server reserved for the protocol (lint + test). Phase 3: allow-listed service names before any file path (path traversal tested); ticket assignee allow-list (an injected `admin` ticket is rejected by the server); parameterised SQL + CHECK constraints; error messages hide paths and SQLite details; untrusted-data notice in log results.
+Design §9. Phase 1 controls in place: `.env` ignored; `.env.example` placeholder-only (tested); key wrapped in `ApiKey` with redacting Debug/Display (tested incl. debug logs); hidden key entry in setup; `.npmrc` ignore-scripts + engine-strict; `unsafe_code` forbidden; stdout of the MCP server reserved for the protocol (lint + test). Phase 3: allow-listed service names before any file path (path traversal tested); ticket assignee allow-list (an injected `admin` ticket is rejected by the server); parameterised SQL + CHECK constraints; error messages hide paths and SQLite details; untrusted-data notice in log results. Phase 4: filesystem server read-only + confine-roots + single dir, verified after connect (fail closed); pre-launch workspace scan; children get a scrubbed environment (API key never inherited); per-request and startup timeouts; documented upstream Windows junction race (docs/FILESYSTEM_MCP.md §7).
