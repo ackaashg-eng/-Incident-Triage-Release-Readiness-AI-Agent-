@@ -7,13 +7,13 @@ Incident Triage & Release Readiness AI Agent: a Rust CLI orchestrator that uses 
 
 ## Location & Git
 `C:\Users\ASUS\Music\SpilLabs\Agent MCP Ochestra` (name kept as-is by user decision).
-Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` = this folder). Phase 1 committed on `main` (4 commits). The author identity is set for this repo only (`ackaashg`, the user's account email, by the user's choice). Never use the repo at `C:\Users\ASUS`.
+Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` = this folder). Phase 1 committed on `main` (5 commits, including `package-lock.json`). The author identity is set for this repo only (`ackaashg`, the user's account email, by the user's choice). Never use the repo at `C:\Users\ASUS`.
 
 ## Phase status
 | Phase | Name | Status |
 |---|---|---|
 | 0 | Analysis & architecture planning | COMPLETE (approved 2026-11-23) |
-| 1 | Environment & project foundation | READY FOR REVIEW (one open item: Node 24+) |
+| 1 | Environment & project foundation | READY FOR REVIEW (committed; API key deferred by the user) |
 | 2 | Mock data engineering | NOT STARTED |
 | 3 | Custom telemetry MCP server | NOT STARTED |
 | 4 | Filesystem MCP integration | NOT STARTED |
@@ -68,7 +68,7 @@ docs/PHASE_0_DESIGN.md  docs/learning/{phase-0,phase-1}.md
 ## Verified environment (2026-11-23)
 - rustc / cargo 1.99.1 (stable-x86_64-pc-windows-msvc), with clippy and rustfmt
 - Visual Studio Build Tools 2026 (VC tools x64)
-- node v22.18.0 (**too old for the FS server; upgrade to 24+ pending**), npm/npx 11.21.1
+- node **v26.13.1** (the user upgraded from 22.18 during Phase 1), npm/npx 11.x
 - git 2.51.0; PowerShell 5.1.26100; execution policy CurrentUser = RemoteSigned
 - VS Code 1.147.0; Rust extensions not installed (recommended via `.vscode/extensions.json`)
 - gh CLI not installed (not needed)
@@ -76,7 +76,7 @@ docs/PHASE_0_DESIGN.md  docs/learning/{phase-0,phase-1}.md
 ## Dependency versions
 In use (Cargo.lock): anyhow 1.0.105 · thiserror 2.0.21 · dotenvy 0.15.7 · tracing 0.1.44 · tracing-subscriber 0.3.23 · tempfile 3.27.0 (dev).
 Declared for later phases (workspace table, not compiled yet): rmcp =3.11.0 · tokio 1.54.1 · serde 1 · serde_json 1.0.154 · schemars 1.2.3 · rusqlite 0.43.0 · chrono 0.4.45 · reqwest 0.13.5 · clap 4.6.9 · sha2 0.11.1.
-npm (pinned, not yet installed): @modelcontextprotocol/server-filesystem 2.4.0.
+npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol/server-filesystem 2.4.0.
 
 ## Verified commands (run from the project folder)
 | Command | Result (2026-11-23) |
@@ -90,7 +90,10 @@ npm (pinned, not yet installed): @modelcontextprotocol/server-filesystem 2.4.0.
 | `.\scripts\run.ps1` (key from the environment) | foundation check printed, key shown as `***`, exit 0 |
 | `git check-ignore -v .env target data/tickets.db …` | all ignored; `.env.example` not ignored |
 
-**Not verified by me:** the interactive key prompt in `setup.ps1` (needs a human at the keyboard); `npm ci` (needs Node 24+).
+| `npm ci` (Node 26.13.1) | OK, 12 packages, server-filesystem 2.4.0 |
+| `node node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only "<abs>\mock_data\workspace"` | "Read-only mode" printed; the only allowed dir is `mock_data\workspace`; stdout empty |
+
+**Not verified by me:** the interactive key prompt in `setup.ps1` (needs a human at the keyboard and an API key, which the user doesn't have yet).
 
 ## Test results (Phase 1)
 - agent-client unit (config): 8/8
@@ -99,7 +102,6 @@ npm (pinned, not yet installed): @modelcontextprotocol/server-filesystem 2.4.0.
 - mcp-server integration (startup): 1/1 (stdout stays empty)
 
 ## Known issues / open items
-- **Node.js 24+ needed** (the user will install it). Then: rerun `scripts\setup.ps1`, which creates `package-lock.json` (to be committed) and installs the FS server.
 - **No API key yet** (the user will get one later). Everything up to Phase 4 works without it (tests need no key). It's needed for the first live agent run in Phase 5; then run `scripts\setup.ps1` (or `-ResetKey`).
 - GitHub repo: the user provides the URL in Phase 8.
 - rmcp 3.11.0 is new: compile probe at the start of Phase 3.
