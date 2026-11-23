@@ -17,13 +17,23 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | 2 | Mock data engineering | COMPLETE (approved 2026-11-23) |
 | 3 | Custom telemetry MCP server | COMPLETE (approved 2026-11-23) |
 | 4 | Filesystem MCP integration | COMPLETE (approved 2026-11-23) |
-| 5 | Multi-server agent orchestrator | IN PROGRESS |
-| 6 | Guardrails & security | NOT STARTED |
+| 5 | Multi-server agent orchestrator | COMPLETE (approved 2026-11-24; live Claude run deferred until the account has credits) |
+| 6 | Guardrails & security | IN PROGRESS |
 | 7 | Evaluation & testing | NOT STARTED |
 | 8 | Documentation & submission | NOT STARTED |
 
-**Current phase:** 5, IN PROGRESS (approved to start 2026-11-23).
-**Next approved action:** build the agent orchestrator. Phase 6 starts only after the user approves Phase 5.
+**Current phase:** 6, IN PROGRESS (approved to start 2026-11-24).
+**Next approved action:** guardrails and security. Phase 7 starts only after the user approves Phase 6.
+
+**Live-API verification deferred (user decision 2026-11-24):** the key in `.env` authenticates, but the Anthropic account has no credits (400 `credit balance is too low`, request req_011ChLMcWXwsVqGGtx9G8aTn). The user said: build on as if the key works. Every phase is verified offline (scripted Claude / local fake API). **Before submission (Phase 7/8), once credits exist:** run the live demo, `.\scripts\run.ps1 ask "Customers report failed payments since this morning. Investigate payments-api and open an incident ticket if warranted."`, and the evaluation suite. Grok/other providers: discussed, not adopted (master prompt mandates Claude; multi-provider support would be an optional later extension).
+
+## Phase 5 summary (agent orchestrator)
+- `agent-client` modules: `llm/` (`types.rs` request/response, `anthropic.rs` HTTP + retries + `LlmClient` trait), `agent/` (`registry.rs` discovery → namespaced tools + permission + schema adaptation, `validate.rs` JSON-schema subset validator, `prompt.rs` system prompt without tool names, `approval.rs` `Approver` trait + `DeferredApprover`, `runner.rs` agentic loop + `Observer` events), `mcp/manager.rs` (`ServerSet`: concurrent connect, discovery, graceful degradation, shutdown), `cli.rs` (interactive REPL + `ask`).
+- CLI: `agent-client` (interactive: /tools /servers /reset /help /exit, Ctrl+C cancels a request), `ask "..."`, `check-mcp`, `config` (old foundation check).
+- Tool names `<server>__<tool>`; generated `telemetry__read_resource`; 14 tools (3 + 1 telemetry, 10 files); policy: readOnlyHint → read-only, `telemetry/create_incident_ticket` → requires approval, else blocked.
+- Loop: max_iterations; all tool_results in one user message; refusal/max_tokens → no tools run, history rolled back; API error → rollback; iteration limit → synthetic assistant note keeps alternation.
+- Request: model, max_tokens 16000, cached system block, tools sorted, tool_choice auto, output_config.effort, thinking `{adaptive, display: updates}` when progress updates on, fallbacks `default`; betas `server-side-fallback-2026-07-01,thinking-display-updates-2026-08-18`; anthropic-version 2026-10-21.
+- New config: `ANTHROPIC_PROGRESS_UPDATES` (on), `ANTHROPIC_TIMEOUT_SECS` (300), `ANTHROPIC_BASE_URL` (tests only; https or localhost), `TICKETS_DB`.
 
 ## Phase 4 summary (filesystem MCP integration)
 - External server unchanged: `node <project>\node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only --confine-roots -- <project>\mock_data\workspace` (no npx; arguments as a list; cwd = workspace).
@@ -83,22 +93,32 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | Child env | every MCP server starts with `env_clear()` + system allow-list (no API key, no NODE_OPTIONS) | Phase 4 |
 | FS verification | fail closed: refuse if any tool lacks `readOnlyHint: true` or allowed dirs ≠ workspace; pre-launch scan refuses secrets/links in the workspace | Phase 4 |
 | `check-mcp` | `agent-client check-mcp` / `.\scripts\run.ps1 check-mcp` verifies both servers without an API key | Phase 4 |
+| reqwest TLS (final) | `native-tls` (Windows SChannel); no CMake/NASM needed | Phase 5 |
+| Tool naming | `<server>__<tool>`; resources via generated `<server>__read_resource` (only for servers that list resources) | Phase 5 |
+| Permission policy | readOnlyHint → ReadOnly; explicit list → RequiresApproval; else Blocked (not sent to Claude) | Phase 5 |
+| Argument validation | client-side against the ORIGINAL MCP schema before any call; servers validate again | Phase 5 |
+| Tool result to Claude | text content (structured only if no text); 30,000-char cap | Phase 5 |
+| Approval hand-off | `Approver` trait; Phase 5 `DeferredApprover` = shown, never executed | Phase 5 |
+| Child process group | MCP servers start with CREATE_NEW_PROCESS_GROUP so Ctrl+C cancels a request without killing them | Phase 5 |
+| Mode names | no args = interactive agent; foundation check moved to `agent-client config` | Phase 5 |
 
 Full design: `docs/PHASE_0_DESIGN.md`.
 
-## Directory structure (actual, end of Phase 4)
+## Directory structure (actual, Phase 5)
 ```
 Cargo.toml  Cargo.lock  clippy.toml  package.json  package-lock.json  .npmrc
 .env.example  .gitignore  .gitattributes  .vscode/{extensions,settings}.json
 README.md  PROJECT_CONTEXT.md
-agent-client/  Cargo.toml  src/{lib,main,config,logging,check}.rs  src/mcp/{mod,connection,filesystem,telemetry,child_env}.rs
-               tests/{cli_smoke,filesystem_mcp}.rs
+agent-client/  Cargo.toml  src/{lib,main,config,logging,check,cli}.rs
+               src/mcp/{mod,connection,filesystem,telemetry,child_env,manager}.rs  src/llm/{mod,types,anthropic}.rs
+               src/agent/{mod,registry,validate,prompt,approval,runner}.rs
+               tests/{cli_smoke,cli_e2e,filesystem_mcp,agent_loop,anthropic_http}.rs  tests/common/mod.rs
 mcp-server/    Cargo.toml  src/{lib,main,config,logging,error,data,tickets,server}.rs
                tests/{startup,mock_data,mcp_protocol}.rs
 mock_data/     logs.json deployments.json release-checklist.md runbooks/*.md workspace/{RELEASE_NOTES.md,service-config.yaml}
 data/.gitkeep   evals/results/.gitkeep   traces/samples/.gitkeep
 scripts/{setup,run,demo-mcp}.ps1
-docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/learning/phase-{0,1,2,3,4}.md
+docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/learning/phase-{0,1,2,3,4,5}.md
 .env (local only, placeholder key; git-ignored)
 ```
 
@@ -120,7 +140,7 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | Command | Result (2026-11-23) |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | 104 passed, 0 failed (Phase 4; run twice) |
+| `cargo test --workspace` | 145 passed, 0 failed (Phase 5; run twice) |
 | `.\scripts\run.ps1 check-mcp` | all checks passed; no node.exe left running |
 | `cargo clippy --workspace --all-targets -- -D warnings` | OK, no warnings |
 | `cargo fmt --all -- --check` | OK |
@@ -133,6 +153,13 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | `node node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only "<abs>\mock_data\workspace"` | "Read-only mode" printed; the only allowed dir is `mock_data\workspace`; stdout empty |
 
 **Not verified by me:** the interactive key prompt in `setup.ps1` (needs a human at the keyboard and an API key, which the user doesn't have yet).
+
+## Test results (Phase 5, 2026-11-24)
+`cargo test --workspace`: **145 passed, 0 failed**, run twice; no node/telemetry processes left. clippy `-D warnings` + fmt clean. agent-client: 37 unit, 8 agent_loop, 8 anthropic_http, 4 cli_e2e, 7 cli_smoke, 15 filesystem_mcp; mcp-server 66.
+- agent_loop (scripted Claude + REAL servers): both servers connect, 14 tools mapped to the right server; full investigation (parallel search_logs + get_deployment_history → runbook resource + RELEASE_NOTES via files → ticket PROPOSAL not executed → answer), identical tools/system in every request, verbatim history; unknown tool / invalid args / unknown service / outside path / hostile URI / missing resource / bad window all returned to Claude as errors; refusal + max_tokens run no tools and roll back; API error rollback; iteration limit; malformed responses; reset.
+- anthropic_http (real client vs local fake API): headers (key, version 2026-10-21, betas), body rules, 429/529 retried with retry-after, overload/server errors give up after 3 retries, 401/403/400/404 not retried, malformed JSON, timeouts, unreachable endpoint; key never in errors.
+- cli_e2e (real binary + real servers + fake API): `ask` multi-step investigation output and API payloads, interactive commands//reset//exit, 401 reported with setup hint, usage error.
+- **Not yet verified: a live run against the real Claude API** (no key).
 
 ## Test results (Phase 4, 2026-11-23)
 `cargo test --workspace`: **104 passed, 0 failed**, run twice. agent-client 16 unit + 7 cli_smoke + 15 filesystem_mcp; mcp-server 34 + 14 + 16 + 2. clippy `-D warnings` and fmt: clean.
@@ -159,7 +186,8 @@ One defect found and fixed during the phase: the notification-worker runbook lac
 - mcp-server integration (startup): 1/1 (stdout stays empty)
 
 ## Known issues / open items
-- **No API key yet** (the user will get one later). Everything up to Phase 4 works without it (tests need no key). It's needed for the first live agent run in Phase 5; then run `scripts\setup.ps1` (or `-ResetKey`).
+- **No API key yet** (placeholder in `.env` on 2026-11-24). All tests run without it. It's needed for the Phase 5 live demo: `.\scripts\setup.ps1 -ResetKey` → paste → `.\scripts\run.ps1 ask "Investigate the payments-api errors"`.
+- Live-only unknowns until the key exists: acceptance of the `thinking-display-updates` beta (switch off with `ANTHROPIC_PROGRESS_UPDATES=off` if a 400 names it) and real token/latency numbers.
 - GitHub repo: the user provides the URL in Phase 8.
 - Resolved in Phase 3: rmcp 3.11.0 compile probe passed; `OPS_REFERENCE_TIME` validated at server start.
 - Error messages from the filesystem server contain absolute paths (user folder); consider shortening in Phase 6.

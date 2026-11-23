@@ -6,7 +6,8 @@ use std::process::{Command, Output};
 
 fn run_in(dir: &std::path::Path, extra_env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-client"));
-    cmd.current_dir(dir);
+    // `config` loads and prints the configuration without starting anything.
+    cmd.arg("config").current_dir(dir);
     // Make the tests independent of anything set on the developer's machine.
     for var in [
         "ANTHROPIC_API_KEY",

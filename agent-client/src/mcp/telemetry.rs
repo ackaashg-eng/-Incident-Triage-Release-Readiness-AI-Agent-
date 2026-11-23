@@ -27,7 +27,7 @@ pub fn launch(settings: &McpSettings) -> Result<ServerLaunch, McpError> {
             ),
             (
                 "TICKETS_DB".to_string(),
-                root.join("data").join("tickets.db").display().to_string(),
+                settings.tickets_db.display().to_string(),
             ),
             (
                 "OPS_REFERENCE_TIME".to_string(),

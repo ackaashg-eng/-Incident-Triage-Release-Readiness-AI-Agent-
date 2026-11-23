@@ -56,6 +56,8 @@ All settings live in `.env` (git-ignored). `.env.example` documents each one wit
 | `ANTHROPIC_MODEL` | `claude-opus-5-5` | Claude model |
 | `ANTHROPIC_EFFORT` | `medium` | `low` … `max` |
 | `ANTHROPIC_FALLBACKS` | `on` | Server-side retry on a fallback model if a request is declined |
+| `ANTHROPIC_PROGRESS_UPDATES` | `on` | Show Claude's short progress notes between tool calls |
+| `ANTHROPIC_TIMEOUT_SECS` | `300` | Timeout for one Claude API call (10–900) |
 | `MAX_ITERATIONS` | `8` | Claude calls allowed per user request (1–50) |
 | `TOOL_TIMEOUT_SECS` | `10` | Per-tool timeout (1–300) |
 | `OPS_REFERENCE_TIME` | `2026-11-20T12:00:00Z` | "Now" for the simulated data (`now` = real clock) |
@@ -68,10 +70,30 @@ All settings live in `.env` (git-ignored). `.env.example` documents each one wit
 ## Run
 
 ```powershell
-.\scripts\run.ps1
+.\scripts\run.ps1                                              # interactive session
+.\scripts\run.ps1 ask "Investigate the payments-api errors"     # one request, then exit
+.\scripts\run.ps1 check-mcp                                    # test both MCP servers (no key needed)
+.\scripts\run.ps1 config                                       # show the loaded configuration
 ```
 
-This builds anything that changed and starts the agent from the project folder. In Phase 1 it prints a foundation check (model, limits, paths, `API key: loaded (***)`).
+The script builds anything that changed and starts the agent from the project folder. The agent starts both MCP servers, discovers their tools, and shows every step while it works:
+
+```
+you> Investigate the payment API errors
+  [step 1/8] asking Claude...
+  ~ Checking recent payments-api errors and deployments first.
+  -> telemetry__search_logs {"service_name":"payments-api","severity":"ERROR","limit":10}
+     ok telemetry__search_logs: 8 of 8 matching log entries (12 ms)
+  -> telemetry__get_deployment_history {"service_name":"payments-api","window_hours":24}
+     ok telemetry__get_deployment_history: 1 deployment(s) in the window (4 ms)
+  [step 2/8] asking Claude...
+  ...
+claude> Summary: ...
+```
+
+Interactive commands: `/tools`, `/servers`, `/reset` (forget the conversation), `/help`, `/exit`. Ctrl+C cancels the current request; at the prompt it exits.
+
+A tool that changes something (`create_incident_ticket`) is only **proposed**: the proposal is shown, and nothing runs until a human approves it. The approval prompt arrives in Phase 6; until then proposals are shown but not executed.
 
 ---
 

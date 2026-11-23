@@ -157,6 +157,14 @@ impl McpConnection {
             .env_clear()
             .envs(child_env::inherited())
             .envs(launch.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        // Windows sends Ctrl+C to every process attached to the console. A new
+        // process group keeps the servers alive when the user presses Ctrl+C
+        // to cancel one request; they still stop when the agent closes them.
+        #[cfg(windows)]
+        {
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
 
         tracing::info!(server, command = %launch.display(), "starting MCP server");
         let (transport, stderr) = TokioChildProcess::builder(cmd)
@@ -253,6 +261,28 @@ impl McpConnection {
             || "unknown".to_string(),
             |info| info.protocol_version.to_string(),
         )
+    }
+
+    /// What the server says it supports (tools, resources, prompts, ...).
+    pub fn capabilities(&self) -> Vec<&'static str> {
+        let Some(info) = self.service.peer_info() else {
+            return Vec::new();
+        };
+        let caps = &info.capabilities;
+        let mut out = Vec::new();
+        if caps.tools.is_some() {
+            out.push("tools");
+        }
+        if caps.resources.is_some() {
+            out.push("resources");
+        }
+        if caps.prompts.is_some() {
+            out.push("prompts");
+        }
+        if caps.logging.is_some() {
+            out.push("logging");
+        }
+        out
     }
 
     pub fn is_closed(&self) -> bool {

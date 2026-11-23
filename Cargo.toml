@@ -31,9 +31,9 @@ serde_json = "1.0.154"
 schemars = "1.2.3"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 chrono = { version = "0.4.45", features = ["serde"] }
-# TLS backend decided in Phase 5: 0.13's rustls uses aws-lc-rs (may need CMake/NASM
-# on Windows); native-tls (Windows SChannel) needs no extra build tools.
-reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+# TLS: native-tls = Windows SChannel (no extra build tools). rustls in 0.13 uses
+# aws-lc-rs, which can need CMake/NASM on Windows. Decided in Phase 5.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "native-tls"] }
 clap = { version = "4.6.9", features = ["derive"] }
 sha2 = "0.11.1"
 

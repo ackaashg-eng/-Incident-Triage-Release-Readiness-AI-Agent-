@@ -1,19 +1,24 @@
 //! agent-client: command-line entry point.
 //!
 //! ```text
-//! agent-client             foundation check (needs the API key)
-//! agent-client check-mcp   start both MCP servers, verify them, stop them (no key needed)
+//! agent-client                  interactive investigation session (needs the API key)
+//! agent-client ask "<request>"  one request, then exit (needs the API key)
+//! agent-client check-mcp        start, verify and stop both MCP servers (no key needed)
+//! agent-client config           show the loaded configuration (key shown as ***)
 //! ```
-//! The interactive agent arrives in Phase 5.
 
 use std::path::Path;
 use std::process::ExitCode;
 
 use agent_client::config::{self, Config, McpSettings};
-use agent_client::{check, logging};
+use agent_client::{check, cli, logging};
 use anyhow::{Context, Result, bail};
 
-const USAGE: &str = "usage: agent-client [check-mcp]\n  (no argument)  foundation check\n  check-mcp       start, verify and stop both MCP servers (no API key needed)";
+const USAGE: &str = "usage: agent-client [ask \"<request>\" | check-mcp | config]
+  (no argument)      interactive investigation session
+  ask \"<request>\"    run one request and exit
+  check-mcp          start, verify and stop both MCP servers (no API key needed)
+  config             show the loaded configuration";
 
 fn main() -> ExitCode {
     match run() {
@@ -31,15 +36,30 @@ fn run() -> Result<bool> {
     // The project root is the working directory (scripts\run.ps1 sets it).
     let base_dir = std::env::current_dir().context("cannot determine the current directory")?;
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    match args
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        [] => foundation_check(&base_dir).map(|()| true),
-        ["check-mcp"] => check_mcp(&base_dir),
+    match words.as_slice() {
+        [] => {
+            let config = load(&base_dir)?;
+            runtime()?
+                .block_on(cli::interactive(&config))
+                .map(|()| true)
+        }
+        ["ask", rest @ ..] if !rest.is_empty() => {
+            let question = rest.join(" ");
+            let config = load(&base_dir)?;
+            runtime()?.block_on(cli::ask(&config, &question))
+        }
+        ["check-mcp"] => {
+            let settings = McpSettings::load(&base_dir)?;
+            logging::init(&config::log_level(&|k: &str| std::env::var(k).ok()))?;
+            runtime()?.block_on(check::run(&settings))
+        }
+        ["config"] => {
+            let config = load(&base_dir)?;
+            print_config(&config);
+            Ok(true)
+        }
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
             Ok(true)
@@ -48,39 +68,28 @@ fn run() -> Result<bool> {
     }
 }
 
-fn check_mcp(base_dir: &Path) -> Result<bool> {
-    let settings = McpSettings::load(base_dir)?;
-    logging::init(&config::log_level(&|k: &str| std::env::var(k).ok()))?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("could not start the async runtime")?;
-    runtime.block_on(check::run(&settings))
-}
-
-fn foundation_check(base_dir: &Path) -> Result<()> {
+fn load(base_dir: &Path) -> Result<Config> {
     let config = Config::load(base_dir)?;
     logging::init(&config.log_level)?;
-
-    tracing::info!(
-        model = %config.model,
-        effort = %config.effort,
-        max_iterations = config.max_iterations,
-        "configuration loaded"
-    );
-
-    print_foundation_check(&config);
-    Ok(())
+    tracing::info!(model = %config.model, effort = %config.effort, max_iterations = config.max_iterations, "configuration loaded");
+    Ok(config)
 }
 
-fn print_foundation_check(cfg: &Config) {
-    println!("Incident Triage Agent - foundation check");
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("could not start the async runtime")
+}
+
+fn print_config(cfg: &Config) {
+    println!("Incident Triage Agent - configuration");
     println!("  model              : {}", cfg.model);
     println!("  effort             : {}", cfg.effort);
-    println!(
-        "  refusal fallbacks  : {}",
-        if cfg.fallbacks { "on" } else { "off" }
-    );
+    println!("  refusal fallbacks  : {}", on_off(cfg.fallbacks));
+    println!("  progress updates   : {}", on_off(cfg.progress_updates));
+    println!("  API endpoint       : {}", cfg.api_base_url);
+    println!("  API timeout        : {}s", cfg.request_timeout.as_secs());
     println!("  max iterations     : {}", cfg.max_iterations);
     println!("  tool timeout       : {}s", cfg.mcp.tool_timeout.as_secs());
     println!("  reference time     : {}", cfg.mcp.ops_reference_time);
@@ -100,10 +109,12 @@ fn print_foundation_check(cfg: &Config) {
         cfg.mcp.filesystem_root.display(),
         status(&cfg.mcp.filesystem_root)
     );
+    println!("  tickets database   : {}", cfg.mcp.tickets_db.display());
     println!("  trace file         : {}", cfg.trace_file.display());
-    println!(
-        "Run `agent-client check-mcp` to test both MCP servers. The agent loop arrives in Phase 5."
-    );
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b { "on" } else { "off" }
 }
 
 fn status(path: &Path) -> &'static str {

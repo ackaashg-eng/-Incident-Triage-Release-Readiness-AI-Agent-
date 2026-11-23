@@ -14,8 +14,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 # MCP client side: spawn servers as child processes and talk over stdio.
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "time", "sync", "signal", "net"] }
+serde.workspace = true
 serde_json.workspace = true
+# Claude Messages API over HTTPS (no official Rust SDK exists).
+reqwest.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

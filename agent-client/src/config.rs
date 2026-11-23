@@ -22,6 +22,8 @@ const DEFAULT_MAX_ITERATIONS: u32 = 8;
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_LOG_LEVEL: &str = "warn";
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 20;
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Everything that can be wrong with the configuration.
 /// Each message tells the user how to fix it.
@@ -56,8 +58,11 @@ pub enum ConfigError {
 pub struct ApiKey(String);
 
 impl ApiKey {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
+
     /// The real key, for the HTTP header only. Never log the result.
-    #[allow(dead_code)] // first used by the Claude API client in Phase 5
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -120,6 +125,12 @@ pub struct Config {
     pub effort: Effort,
     /// Server-side refusal fallbacks (`fallbacks: "default"`).
     pub fallbacks: bool,
+    /// Ask for short progress notes between tool calls (`thinking.display: "updates"`).
+    pub progress_updates: bool,
+    /// `https://api.anthropic.com` unless overridden (tests use a local fake server).
+    pub api_base_url: String,
+    /// Timeout for one Messages API HTTP request.
+    pub request_timeout: Duration,
     /// Maximum Claude calls per user request.
     pub max_iterations: u32,
     /// How to launch and talk to the two MCP servers.
@@ -169,6 +180,34 @@ impl Config {
             Some(v) => parse_on_off("ANTHROPIC_FALLBACKS", &v)?,
         };
 
+        let progress_updates = match get("ANTHROPIC_PROGRESS_UPDATES") {
+            None => true,
+            Some(v) => parse_on_off("ANTHROPIC_PROGRESS_UPDATES", &v)?,
+        };
+
+        let request_timeout_secs = parse_number(
+            "ANTHROPIC_TIMEOUT_SECS",
+            get("ANTHROPIC_TIMEOUT_SECS"),
+            DEFAULT_REQUEST_TIMEOUT_SECS,
+            10..=900,
+        )?;
+
+        let api_base_url = get("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
+        if !(api_base_url.starts_with("https://")
+            || api_base_url.starts_with("http://127.0.0.1")
+            || api_base_url.starts_with("http://localhost"))
+        {
+            return Err(ConfigError::InvalidValue {
+                name: "ANTHROPIC_BASE_URL",
+                value: api_base_url,
+                reason: "must be an https:// URL (plain http only for localhost testing)"
+                    .to_string(),
+            });
+        }
+
         let max_iterations = parse_number(
             "MAX_ITERATIONS",
             get("MAX_ITERATIONS"),
@@ -183,6 +222,9 @@ impl Config {
             model: get("ANTHROPIC_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             effort,
             fallbacks,
+            progress_updates,
+            api_base_url,
+            request_timeout: Duration::from_secs(request_timeout_secs),
             max_iterations,
             mcp,
             trace_file: resolve(
@@ -207,6 +249,8 @@ pub struct McpSettings {
     /// Passed through to the telemetry server ("now" for time windows).
     pub ops_reference_time: String,
     pub telemetry_server_path: PathBuf,
+    /// SQLite file the telemetry server stores tickets in.
+    pub tickets_db: PathBuf,
     /// The Node.js executable (`node` = found on PATH).
     pub node_exe: PathBuf,
     /// Entry script of `@modelcontextprotocol/server-filesystem`.
@@ -257,6 +301,7 @@ impl McpSettings {
                 "TELEMETRY_SERVER_PATH",
                 r"target\debug\ops-telemetry-mcp.exe",
             ),
+            tickets_db: path("TICKETS_DB", r"data\tickets.db"),
             // A bare program name is looked up on PATH, so it is not joined to base_dir.
             node_exe: PathBuf::from(get("NODE_EXE").unwrap_or_else(|| "node".to_string())),
             filesystem_server_script: path(
@@ -359,6 +404,9 @@ mod tests {
         assert_eq!(cfg.model, "claude-opus-5-5");
         assert_eq!(cfg.effort, Effort::Medium);
         assert!(cfg.fallbacks);
+        assert!(cfg.progress_updates);
+        assert_eq!(cfg.api_base_url, "https://api.anthropic.com");
+        assert_eq!(cfg.request_timeout, Duration::from_secs(300));
         assert_eq!(cfg.max_iterations, 8);
         assert_eq!(cfg.mcp.tool_timeout, Duration::from_secs(10));
         assert_eq!(cfg.mcp.startup_timeout, Duration::from_secs(20));
@@ -447,6 +495,9 @@ mod tests {
             ("MAX_ITERATIONS", "eight"),
             ("TOOL_TIMEOUT_SECS", "-5"),
             ("MCP_STARTUP_TIMEOUT_SECS", "0"),
+            ("ANTHROPIC_TIMEOUT_SECS", "5"),
+            ("ANTHROPIC_PROGRESS_UPDATES", "sometimes"),
+            ("ANTHROPIC_BASE_URL", "http://evil.example.com"),
         ];
         for (name, value) in cases {
             let err = load(&[("ANTHROPIC_API_KEY", "k"), (name, value)]).unwrap_err();
