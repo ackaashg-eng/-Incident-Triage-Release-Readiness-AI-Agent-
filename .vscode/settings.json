@@ -1,0 +1,13 @@
+{
+  // Run clippy (stricter than `cargo check`) when you save.
+  "rust-analyzer.check.command": "clippy",
+  "[rust]": {
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+  "files.exclude": {
+    "target": true,
+    "node_modules": true
+  },
+  "python.terminal.useEnvFile": true
+}

@@ -1,0 +1,8 @@
+{
+  // VS Code shows an "install recommended extensions" prompt for these.
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "tamasfe.even-better-toml",
+    "vadimcn.vscode-lldb"
+  ]
+}

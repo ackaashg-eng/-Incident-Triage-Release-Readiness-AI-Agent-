@@ -1,0 +1,6 @@
+# Normalise line endings in the repository (LF), checkout per platform.
+* text=auto
+# PowerShell scripts keep Windows line endings.
+*.ps1 text eol=crlf
+*.pdf binary
+*.db binary
