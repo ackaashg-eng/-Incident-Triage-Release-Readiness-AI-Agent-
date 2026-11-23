@@ -1,0 +1,2 @@
+# `unwrap()` is warned about in application code, but is fine inside tests.
+allow-unwrap-in-tests = true
