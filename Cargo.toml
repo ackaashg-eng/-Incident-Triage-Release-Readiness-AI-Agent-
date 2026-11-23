@@ -21,6 +21,8 @@ dotenvy = "0.15.7"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tempfile = "3.27.0"
+# --- used from Phase 2 (mock-data validation tests only) ---
+yaml-rust2 = "0.13.2"
 # --- planned for later phases (see docs/PHASE_0_DESIGN.md §5) ---
 rmcp = { version = "=3.11.0", default-features = false }
 tokio = "1.54.1"

@@ -13,17 +13,24 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | Phase | Name | Status |
 |---|---|---|
 | 0 | Analysis & architecture planning | COMPLETE (approved 2026-11-23) |
-| 1 | Environment & project foundation | READY FOR REVIEW (committed; API key deferred by the user) |
-| 2 | Mock data engineering | NOT STARTED |
-| 3 | Custom telemetry MCP server | NOT STARTED |
+| 1 | Environment & project foundation | COMPLETE (approved 2026-11-23; API key deferred by the user) |
+| 2 | Mock data engineering | COMPLETE (approved 2026-11-23) |
+| 3 | Custom telemetry MCP server | IN PROGRESS |
 | 4 | Filesystem MCP integration | NOT STARTED |
 | 5 | Multi-server agent orchestrator | NOT STARTED |
 | 6 | Guardrails & security | NOT STARTED |
 | 7 | Evaluation & testing | NOT STARTED |
 | 8 | Documentation & submission | NOT STARTED |
 
-**Current phase:** 1, READY FOR REVIEW.
-**Next approved action:** none. Phase 2 starts only after the user approves Phase 1.
+**Current phase:** 3, IN PROGRESS (approved to start 2026-11-23).
+**Next approved action:** build the telemetry MCP server. Phase 4 starts only after the user approves Phase 3.
+
+## Phase 2 summary (mock data)
+- `mock_data/`: logs.json (45 entries: INFO 21, WARN 9, ERROR 13, FATAL 2; auth 12 / payments 22 / notification 11), deployments.json (8, one rolled back), release-checklist.md (RC-1..RC-9), runbooks ×3, workspace/{RELEASE_NOTES.md, service-config.yaml}.
+- Scenarios: A payments-api outage after 2.14.0 (09:05 → first error 09:12 → FATAL 09:41); B auth key-rotation errors not related to a deployment; C notification-worker 3.2.0 NOT READY (RC-1, 2, 3, 6, 7 fail); D injection in log-0033 (customer_reference field).
+- Spec + ground truth: `docs/MOCK_DATA_SPEC.md` (kept outside `mock_data/` so the agent can't read the answers).
+- Ticket severities used in the runbooks: LOW / MEDIUM / HIGH / CRITICAL → this becomes the Phase 3 enum for `create_incident_ticket.severity`. Assignees are team handles (`*-oncall`).
+- Validation: `mcp-server/tests/mock_data.rs` (16 tests). New test-only dev-deps: serde_json, chrono, yaml-rust2 0.13.2.
 
 ## Confirmed decisions
 | Topic | Decision | Source |
@@ -94,6 +101,10 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | `node node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only "<abs>\mock_data\workspace"` | "Read-only mode" printed; the only allowed dir is `mock_data\workspace`; stdout empty |
 
 **Not verified by me:** the interactive key prompt in `setup.ps1` (needs a human at the keyboard and an API key, which the user doesn't have yet).
+
+## Test results (Phase 2, 2026-11-23)
+`cargo test --workspace`: **32 passed, 0 failed** (Phase 1's 16 + mock_data 16). clippy `-D warnings`: clean. `cargo fmt --check`: clean.
+One defect found and fixed during the phase: the notification-worker runbook lacked a CRITICAL escalation rule.
 
 ## Test results (Phase 1)
 - agent-client unit (config): 8/8

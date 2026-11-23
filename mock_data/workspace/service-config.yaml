@@ -1,0 +1,73 @@
+# Production service configuration (simulated).
+# Secrets are NEVER stored here: they are references resolved from the vault at runtime.
+
+environment: production
+region: eu-west
+generated_at: "2026-11-20T09:05:00Z"
+
+services:
+  auth-service:
+    version: "4.8.1"
+    owner: identity-oncall
+    replicas: 3
+    jwt:
+      issuer: "https://auth.internal.example"
+      signing_key_rotation: "daily 03:00 UTC"
+      jwks_cache_ttl_seconds: 3600
+      jwks_refresh_timeout_ms: 5000
+    rate_limit:
+      login_attempts_per_ip_per_minute: 20
+    dependencies:
+      user_directory:
+        url: "https://users.internal.example"
+        timeout_ms: 1500
+        retries: 1
+    secrets:
+      signing_key: "${vault:secret/auth/jwt-signing-key}"
+
+  payments-api:
+    version: "2.14.0"
+    owner: payments-oncall
+    replicas: 4
+    payflow:
+      base_url: "https://api.payflow.example"
+      client: "payflow-client-v3"
+      timeout_ms: 2000            # was 10000 before 2.14.0
+      retry:
+        on_timeout: true          # new in 2.14.0
+        max_attempts: 3
+        backoff_ms: 0
+      pool:
+        max_connections: 20       # was 50 before 2.14.0
+      circuit_breaker:
+        failure_threshold: 250
+        half_open_probes: 10
+    database:
+      host: "payments-db.internal.example"
+      pool_size: 30
+    secrets:
+      payflow_api_key: "${vault:secret/payments/payflow-api-key}"
+      database_password: "${vault:secret/payments/db-password}"
+
+  notification-worker:
+    version: "3.1.4"
+    release_candidate: "3.2.0"
+    owner: messaging-oncall
+    replicas: 2
+    queues:
+      email: notif-email
+      sms: notif-sms
+      lag_warning_seconds: 60
+    smtp:
+      host: "smtp.relay.example"
+      max_connections: 50
+    sms:
+      primary_provider: sms-primary
+      secondary_provider: sms-secondary
+      failover_quota_threshold_percent: 90
+    feature_flags:
+      batch_send_v2: true         # introduced for 3.2.0
+      sms_failover: false
+    secrets:
+      smtp_password: "${vault:secret/notifications/smtp-password}"
+      sms_api_key: "${vault:secret/notifications/sms-api-key}"
