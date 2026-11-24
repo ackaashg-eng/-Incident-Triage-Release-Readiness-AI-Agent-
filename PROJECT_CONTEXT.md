@@ -19,11 +19,18 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | 4 | Filesystem MCP integration | COMPLETE (approved 2026-11-23) |
 | 5 | Multi-server agent orchestrator | COMPLETE (approved 2026-11-24; live Claude run deferred until the account has credits) |
 | 6 | Guardrails & security | COMPLETE (approved 2026-11-24) |
-| 7 | Evaluation & testing | IN PROGRESS |
-| 8 | Documentation & submission | NOT STARTED |
+| 7 | Evaluation & testing | COMPLETE (approved 2026-11-24; live LLM run still open, see below) |
+| 8 | Documentation & submission | IN PROGRESS |
 
-**Current phase:** 7, IN PROGRESS (approved to start 2026-11-24).
-**Next approved action:** evaluation suite. Phase 8 starts only after the user approves Phase 7.
+**Current phase:** 8, IN PROGRESS (approved to start 2026-11-24).
+**Next approved action:** documentation, traces, audit, compliance matrix.
+
+## Phase 7 summary (evaluation)
+- Suite `evals/benchmarks.json`: B1–B7 (lookup, RCA, readiness for notification-worker 3.2.0, missing service, invalid severity, ambiguous, injection) + G1/G2 (HITL approve/reject); patterns (`tool`, `a|b`, `input_contains`, `optional`), `forbidden_calls`, `approvals`, `checks`.
+- `agent-client eval [--suite F] [--out D] [IDS]` (`src/eval.rs`): live run, fresh conversation per case, `ScriptedApprover.set_steps`, eval-only ticket DB, verdicts PASS/FAIL/ERROR/NOT_RUN, stops after persistent API errors; writes `evals/results/eval-<UTC>/{results.json, report.md, traces.jsonl}`; report has the required table + check details + a separate manual quality section.
+- Functional benchmarks `tests/benchmarks_functional.rs` (7, scripted model, real servers; latencies 0–49 ms); harness test `tests/eval_harness.rs`.
+- `docs/EVALUATION.md`: suite, method, functional tables (measured), guardrail table, live status (NOT obtained), failure analysis, limitations.
+- **Live LLM evaluation: NOT RUN.** 2026-11-24 attempts: credit balance too low (req_011ChLMcWXwsVqGGtx9G8aTn); then `.env` key empty → `ANTHROPIC_API_KEY is not set`. To finish: credits + `setup.ps1 -ResetKey` + `.\scripts\run.ps1 eval` → paste `report.md` into EVALUATION.md §5.
 
 ## Phase 6 summary (guardrails)
 - Policy (`agent/registry.rs`): explicit `READ_ONLY_POLICY` (2 telemetry + 10 files tools; + generated read_resource) and `APPROVAL_REQUIRED` (create_incident_ticket); anything else blocked; server annotation can only make stricter (conflict → blocked).
@@ -114,25 +121,28 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | Approval input | console only (shared stdin); EOF = reject; edit → fresh approval | Phase 6 |
 | Tool output to Claude | redacted → injection-scanned → wrapped as untrusted-data (+ warning if flagged) | Phase 6 |
 | Trace | JSONL, append, every line redacted; tests use their own TRACE_FILE | Phase 6 |
+| B3 subject | notification-worker 3.2.0 (designed release candidate), not payments (2.14.0 is already deployed) | Phase 7 |
+| Eval verdicts | PASS/FAIL functional checks only; ERROR when the API call failed; answer quality = manual section | Phase 7 |
 
 Full design: `docs/PHASE_0_DESIGN.md`.
 
-## Directory structure (actual, Phase 6)
+## Directory structure (actual, Phase 7)
 ```
 Cargo.toml  Cargo.lock  clippy.toml  package.json  package-lock.json  .npmrc
 .env.example  .gitignore  .gitattributes  .vscode/{extensions,settings}.json
 README.md  PROJECT_CONTEXT.md
 agent-client/  Cargo.toml  src/{lib,main,config,logging,check,cli}.rs
                src/mcp/{mod,connection,filesystem,telemetry,child_env,manager}.rs  src/llm/{mod,types,anthropic}.rs
-               src/agent/{mod,registry,validate,prompt,approval,runner}.rs  src/safety/{mod,injection,redact}.rs  src/trace.rs
-               tests/{cli_smoke,cli_e2e,filesystem_mcp,agent_loop,anthropic_http,security}.rs  tests/common/mod.rs  tests/fixtures/misbehaving_mcp_server.js
+               src/agent/{mod,registry,validate,prompt,approval,runner}.rs  src/safety/{mod,injection,redact}.rs  src/trace.rs  src/eval.rs
+               tests/{cli_smoke,cli_e2e,filesystem_mcp,agent_loop,anthropic_http,security,benchmarks_functional,eval_harness}.rs  tests/common/mod.rs  tests/fixtures/misbehaving_mcp_server.js
 traces/samples/phase6-scripted-security-demo.jsonl
 mcp-server/    Cargo.toml  src/{lib,main,config,logging,error,data,tickets,server}.rs
                tests/{startup,mock_data,mcp_protocol}.rs
 mock_data/     logs.json deployments.json release-checklist.md runbooks/*.md workspace/{RELEASE_NOTES.md,service-config.yaml}
 data/.gitkeep   evals/results/.gitkeep   traces/samples/.gitkeep
 scripts/{setup,run,demo-mcp}.ps1
-docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/SECURITY.md  docs/learning/phase-{0,1,2,3,4,5,6}.md
+docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/SECURITY.md  docs/EVALUATION.md  docs/learning/phase-{0,1,2,3,4,5,6,7}.md
+evals/benchmarks.json  evals/results/.gitkeep
 .env (local only, placeholder key; git-ignored)
 ```
 
@@ -154,7 +164,8 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | Command | Result (2026-11-23) |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | 185 passed, 0 failed, 1 ignored (Phase 6; run twice) |
+| `cargo test --workspace` | 197 passed, 0 failed, 1 ignored (Phase 7; run twice) |
+| `.\scripts\run.ps1 eval` | not completed: `ANTHROPIC_API_KEY is not set` (2026-11-24) |
 | `.\scripts\run.ps1 check-mcp` | all checks passed; no node.exe left running |
 | `cargo clippy --workspace --all-targets -- -D warnings` | OK, no warnings |
 | `cargo fmt --all -- --check` | OK |
@@ -167,6 +178,9 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | `node node_modules\@modelcontextprotocol\server-filesystem\dist\index.js --read-only "<abs>\mock_data\workspace"` | "Read-only mode" printed; the only allowed dir is `mock_data\workspace`; stdout empty |
 
 **Not verified by me:** the interactive key prompt in `setup.ps1` (needs a human at the keyboard and an API key, which the user doesn't have yet).
+
+## Test results (Phase 7, 2026-11-24)
+`cargo test --workspace`: **197 passed, 0 failed** (+1 ignored), run twice; clippy + fmt clean. New: benchmarks_functional 7 (B1 8 ms, B2 49, B3 42, B4 11, B5 1, B6 0, B7 21), eval_harness 1, eval unit 4. Live benchmark verdicts: none (see Phase 7 summary). Details: docs/EVALUATION.md.
 
 ## Test results (Phase 6, 2026-11-24)
 `cargo test --workspace`: **185 passed, 0 failed** (+1 ignored sample-trace writer), run twice; no leftover processes; real trace file untouched. clippy `-D warnings` + fmt clean. New: security.rs 14 (approved/rejected/edited/tampered tickets, invalid write payloads never reach the reviewer, injection in logs with a fooled model, injection + secrets in files, 10 traversal paths, unauthorized tools, default 8-iteration limit, hanging tool → timeout, server death → disconnected, API failure traced + rollback, trace fields + redaction); cli_e2e +3 (console approve / reject / EOF through the real binary); unit +22 (policy, approval incl. console edit flow, hash, injection rules incl. 'only log-0033 flagged', redaction incl. no false positives on mock data, trace format, timeouts parsing). Full mapping: docs/SECURITY.md §6.

@@ -156,7 +156,7 @@ fn compact(value: &Value, max: usize) -> String {
     }
 }
 
-fn agent_settings(config: &Config) -> AgentSettings {
+pub fn agent_settings(config: &Config) -> AgentSettings {
     AgentSettings {
         model: config.model.clone(),
         effort: config.effort,

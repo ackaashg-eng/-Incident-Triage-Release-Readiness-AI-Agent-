@@ -73,6 +73,7 @@ All settings live in `.env` (git-ignored). `.env.example` documents each one wit
 ```powershell
 .\scripts\run.ps1                                              # interactive session
 .\scripts\run.ps1 ask "Investigate the payments-api errors"     # one request, then exit
+.\scripts\run.ps1 eval                                         # run the benchmark suite against Claude
 .\scripts\run.ps1 check-mcp                                    # test both MCP servers (no key needed)
 .\scripts\run.ps1 config                                       # show the loaded configuration
 ```
@@ -166,7 +167,7 @@ agent-client/   the orchestrator CLI (Rust)
 mock_data/      simulated logs, deployments, runbooks, workspace files   (Phase 2)
 data/           runtime SQLite ticket store            (git-ignored contents)
 traces/         agent_traces.jsonl (git-ignored) + samples/ for submission
-evals/          benchmark prompts and results           (Phase 7)
+evals/          benchmarks.json (suite) + results/ (eval runs, git-ignored)
 scripts/        setup.ps1, run.ps1, demo-mcp.ps1
 docs/           design + per-phase learning notes
 ```

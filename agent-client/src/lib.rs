@@ -20,6 +20,7 @@ pub mod agent;
 pub mod check;
 pub mod cli;
 pub mod config;
+pub mod eval;
 pub mod llm;
 pub mod logging;
 pub mod mcp;

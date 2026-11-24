@@ -11,12 +11,13 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use agent_client::config::{self, Config, McpSettings};
-use agent_client::{check, cli, logging};
+use agent_client::{check, cli, eval, logging};
 use anyhow::{Context, Result, bail};
 
-const USAGE: &str = "usage: agent-client [ask \"<request>\" | check-mcp | config]
+const USAGE: &str = "usage: agent-client [ask \"<request>\" | eval [--suite FILE] [--out DIR] [IDS...] | check-mcp | config]
   (no argument)      interactive investigation session
   ask \"<request>\"    run one request and exit
+  eval [IDS...]      run the benchmark suite (evals/benchmarks.json) against Claude
   check-mcp          start, verify and stop both MCP servers (no API key needed)
   config             show the loaded configuration";
 
@@ -50,6 +51,11 @@ fn run() -> Result<bool> {
             let config = load(&base_dir)?;
             runtime()?.block_on(cli::ask(&config, &question))
         }
+        ["eval", rest @ ..] => {
+            let options = eval_options(&base_dir, rest)?;
+            let config = load(&base_dir)?;
+            runtime()?.block_on(eval::run(&config, &options))
+        }
         ["check-mcp"] => {
             let settings = McpSettings::load(&base_dir)?;
             logging::init(&config::log_level(&|k: &str| std::env::var(k).ok()))?;
@@ -66,6 +72,24 @@ fn run() -> Result<bool> {
         }
         _ => bail!("unknown arguments {args:?}\n{USAGE}"),
     }
+}
+
+fn eval_options(base_dir: &Path, args: &[&str]) -> Result<eval::EvalOptions> {
+    let mut options = eval::EvalOptions {
+        suite: base_dir.join("evals").join("benchmarks.json"),
+        out_dir: base_dir.join("evals").join("results"),
+        only: Vec::new(),
+    };
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match *arg {
+            "--suite" => options.suite = base_dir.join(it.next().context("--suite needs a file")?),
+            "--out" => options.out_dir = base_dir.join(it.next().context("--out needs a folder")?),
+            id if !id.starts_with("--") => options.only.push(id.to_string()),
+            other => bail!("unknown eval option {other}\n{USAGE}"),
+        }
+    }
+    Ok(options)
 }
 
 fn load(base_dir: &Path) -> Result<Config> {

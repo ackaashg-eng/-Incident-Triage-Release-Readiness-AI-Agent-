@@ -305,6 +305,13 @@ impl ScriptedApprover {
         }
     }
 
+    /// Replaces the remaining decisions (e.g. before the next benchmark).
+    pub fn set_steps(&self, steps: impl IntoIterator<Item = ScriptedStep>) {
+        if let Ok(mut s) = self.steps.lock() {
+            *s = steps.into_iter().collect();
+        }
+    }
+
     /// Every proposal presented so far.
     pub fn seen(&self) -> Vec<Proposal> {
         self.seen.lock().map(|s| s.clone()).unwrap_or_default()
