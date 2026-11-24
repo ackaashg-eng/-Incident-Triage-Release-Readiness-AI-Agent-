@@ -124,13 +124,18 @@ try {
     }
 
     # ------------------------------------------------------------------
-    Write-Step 'Foundation check'
+    Write-Step 'Checks'
     # ------------------------------------------------------------------
+    $agent = Join-Path $Root 'target\debug\agent-client.exe'
+    # Both MCP servers: start, discover, read the workspace files, refuse escapes (no key needed).
+    & $agent check-mcp
+    if ($LASTEXITCODE -ne 0) { $problems.Add('The MCP server check failed; see the [FAIL] lines above.') }
     if ($SkipKey) {
-        Write-Warn 'Skipped (no key requested).'
+        Write-Warn 'Configuration check skipped (no key requested).'
     } else {
-        & (Join-Path $Root 'target\debug\agent-client.exe')
-        if ($LASTEXITCODE -ne 0) { $problems.Add('The agent could not start; see the error above.') }
+        # Loads .env and validates every setting; the key is shown as ***.
+        & $agent config
+        if ($LASTEXITCODE -ne 0) { $problems.Add('The configuration is not valid; see the error above.') }
     }
 }
 finally {

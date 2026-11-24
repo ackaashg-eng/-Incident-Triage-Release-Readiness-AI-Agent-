@@ -20,10 +20,17 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 | 5 | Multi-server agent orchestrator | COMPLETE (approved 2026-11-24; live Claude run deferred until the account has credits) |
 | 6 | Guardrails & security | COMPLETE (approved 2026-11-24) |
 | 7 | Evaluation & testing | COMPLETE (approved 2026-11-24; live LLM run still open, see below) |
-| 8 | Documentation & submission | IN PROGRESS |
+| 8 | Documentation & submission | COMPLETE (approved 2026-11-24); NOT submission-ready: live Claude run + GitHub remote outstanding |
 
-**Current phase:** 8, IN PROGRESS (approved to start 2026-11-24).
-**Next approved action:** documentation, traces, audit, compliance matrix.
+**Current phase:** all phases approved (8 committed 2026-11-24).
+**Next approved action:** none. Waiting for: GitHub URL (add remote, push only when asked); API credits + key → live `eval` run and a live trace, then update EVALUATION.md §5, REPORT.md §11.2/§14 and traces/samples.
+
+## Phase 8 summary (documentation & submission)
+- README.md rewritten (overview, architecture, components, prerequisites incl. Rust/Node install, setup, configuration incl. filesystem MCP, running server/agent/CLI/eval/audit, example prompts, tests, troubleshooting, layout).
+- REPORT.md: objective, diagram, components, MCP flow, decoupling, discovery, loop, guardrails, injection defence, HITL, evaluation tables, 2 failure-mode reflections, limitations, compliance matrix (R1–R21, M1–M10: Complete except R17/R20/M5 Partial, M10 Pending).
+- Traces: `traces/samples/investigation-with-hitl-approval.jsonl` and `handled-failures-and-edge-cases.jsonl` (+ `.console.txt`) from real binary runs with a scripted model endpoint (`api_endpoint` recorded in session_start); provenance in `traces/samples/README.md`; regenerate via `cargo test -p agent-client --test cli_e2e -- --ignored --test-threads=1`.
+- `scripts/audit.ps1`: repeatable audit (files, build, check-mcp, tests, clippy, fmt, .env tracking, secret scan of tracked files, sample-trace leak check, git clean, remote).
+- Fixes found by the audit: `setup.ps1` ran the interactive agent → now `check-mcp` + `config`; CLI banner leaked the trace path → redacted.
 
 ## Phase 7 summary (evaluation)
 - Suite `evals/benchmarks.json`: B1–B7 (lookup, RCA, readiness for notification-worker 3.2.0, missing service, invalid severity, ambiguous, injection) + G1/G2 (HITL approve/reject); patterns (`tool`, `a|b`, `input_contains`, `optional`), `forbidden_calls`, `approvals`, `checks`.
@@ -38,7 +45,7 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 - `safety/injection.rs` (phrase rules → flags; `<tool_output … trust="untrusted-data">` wrapper with SECURITY WARNING; closing-tag neutralised), `safety/redact.rs` (exact key, token patterns, PEM, Bearer, password=, sensitive JSON keys, local paths → `<project>`/`<home>`).
 - `trace.rs`: JSONL `traces/agent_traces.jsonl` (events session_start, user_request, model_call, approval, tool_call, warning, turn_end, session_end; every line redacted). `ToolCallRecord` with status + approval enums.
 - Per-tool timeouts `TOOL_TIMEOUT_OVERRIDES`; `ServerSet::from_connections`; test fixture `tests/fixtures/misbehaving_mcp_server.js`.
-- Docs: `docs/SECURITY.md` (threats, layers, policy, flow, tests table); sample `traces/samples/phase6-scripted-security-demo.jsonl` (scripted model, labelled), regenerate with `cargo test -p agent-client --test security -- --ignored`.
+- Docs: `docs/SECURITY.md` (threats, layers, policy, flow, tests table); sample `traces/samples/{README.md, investigation-with-hitl-approval.jsonl/.console.txt, handled-failures-and-edge-cases.jsonl/.console.txt, phase6-scripted-security-demo.jsonl}` (scripted model, labelled), regenerate with `cargo test -p agent-client --test security -- --ignored`.
 
 **Live-API verification deferred (user decision 2026-11-24):** the key in `.env` authenticates, but the Anthropic account has no credits (400 `credit balance is too low`, request req_011ChLMcWXwsVqGGtx9G8aTn). The user said: build on as if the key works. Every phase is verified offline (scripted Claude / local fake API). **Before submission (Phase 7/8), once credits exist:** run the live demo, `.\scripts\run.ps1 ask "Customers report failed payments since this morning. Investigate payments-api and open an incident ticket if warranted."`, and the evaluation suite. Grok/other providers: discussed, not adopted (master prompt mandates Claude; multi-provider support would be an optional later extension).
 
@@ -126,22 +133,22 @@ Own git repo since Phase 1 (`git init -b main`; `git rev-parse --show-toplevel` 
 
 Full design: `docs/PHASE_0_DESIGN.md`.
 
-## Directory structure (actual, Phase 7)
+## Directory structure (actual, Phase 8)
 ```
 Cargo.toml  Cargo.lock  clippy.toml  package.json  package-lock.json  .npmrc
 .env.example  .gitignore  .gitattributes  .vscode/{extensions,settings}.json
-README.md  PROJECT_CONTEXT.md
+README.md  REPORT.md  PROJECT_CONTEXT.md
 agent-client/  Cargo.toml  src/{lib,main,config,logging,check,cli}.rs
                src/mcp/{mod,connection,filesystem,telemetry,child_env,manager}.rs  src/llm/{mod,types,anthropic}.rs
                src/agent/{mod,registry,validate,prompt,approval,runner}.rs  src/safety/{mod,injection,redact}.rs  src/trace.rs  src/eval.rs
                tests/{cli_smoke,cli_e2e,filesystem_mcp,agent_loop,anthropic_http,security,benchmarks_functional,eval_harness}.rs  tests/common/mod.rs  tests/fixtures/misbehaving_mcp_server.js
-traces/samples/phase6-scripted-security-demo.jsonl
+traces/samples/{README.md, investigation-with-hitl-approval.jsonl/.console.txt, handled-failures-and-edge-cases.jsonl/.console.txt, phase6-scripted-security-demo.jsonl}
 mcp-server/    Cargo.toml  src/{lib,main,config,logging,error,data,tickets,server}.rs
                tests/{startup,mock_data,mcp_protocol}.rs
 mock_data/     logs.json deployments.json release-checklist.md runbooks/*.md workspace/{RELEASE_NOTES.md,service-config.yaml}
 data/.gitkeep   evals/results/.gitkeep   traces/samples/.gitkeep
-scripts/{setup,run,demo-mcp}.ps1
-docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/SECURITY.md  docs/EVALUATION.md  docs/learning/phase-{0,1,2,3,4,5,6,7}.md
+scripts/{setup,run,demo-mcp,audit}.ps1
+docs/PHASE_0_DESIGN.md  docs/MOCK_DATA_SPEC.md  docs/FILESYSTEM_MCP.md  docs/SECURITY.md  docs/EVALUATION.md  docs/learning/phase-{0,1,2,3,4,5,6,7,8}.md
 evals/benchmarks.json  evals/results/.gitkeep
 .env (local only, placeholder key; git-ignored)
 ```
@@ -164,7 +171,9 @@ npm (pinned + `package-lock.json` committed, 12 packages): @modelcontextprotocol
 | Command | Result (2026-11-23) |
 |---|---|
 | `cargo build --workspace` | OK |
-| `cargo test --workspace` | 197 passed, 0 failed, 1 ignored (Phase 7; run twice) |
+| `cargo test --workspace` | 197 passed, 0 failed, 2 ignored opt-in generators (Phase 8) |
+| `scripts\audit.ps1` | after the Phase 8 commit: see the latest run (2026-11-24) |
+| `scripts\setup.ps1 -SkipKey` | exit 0 (check-mcp all ok) on 2026-11-24 |
 | `.\scripts\run.ps1 eval` | not completed: `ANTHROPIC_API_KEY is not set` (2026-11-24) |
 | `.\scripts\run.ps1 check-mcp` | all checks passed; no node.exe left running |
 | `cargo clippy --workspace --all-targets -- -D warnings` | OK, no warnings |

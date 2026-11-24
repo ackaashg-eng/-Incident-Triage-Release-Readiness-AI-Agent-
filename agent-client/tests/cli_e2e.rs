@@ -281,3 +281,125 @@ async fn no_console_input_means_no_approval() {
     assert!(stdout.contains("treated as REJECTED"), "{stdout}");
     assert!(!tmp.path().join("tickets.db").exists());
 }
+
+/// Runs the real binary once and keeps its trace and console output in
+/// traces/samples/. The model's replies come from the local scripted endpoint
+/// (recorded as `api_endpoint` in the trace); everything else is real.
+async fn record_sample(
+    name: &str,
+    prompt: &str,
+    replies: Vec<Reply>,
+    console_input: &'static [u8],
+) -> String {
+    let fake = FakeAnthropic::start(replies).await;
+    let samples = project_root().join("traces").join("samples");
+    let trace = samples.join(format!("{name}.jsonl"));
+    let console = samples.join(format!("{name}.console.txt"));
+    let _ = std::fs::remove_file(&trace);
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cmd = agent_command(&fake, &tmp.path().join("tickets.db"));
+    cmd.env("TRACE_FILE", &trace)
+        .args(["ask", prompt])
+        .stdin(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(console_input).await.unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().await.unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    std::fs::write(&console, &stdout).unwrap();
+    assert!(
+        !stdout.contains("SECRET123")
+            && !std::fs::read_to_string(&trace)
+                .unwrap()
+                .contains("SECRET123")
+    );
+    stdout
+}
+
+/// Opt-in: `cargo test -p agent-client --test cli_e2e -- --ignored --test-threads=1`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "writes the submission traces into traces/samples/"]
+async fn write_submission_traces() {
+    // 1. A complete multi-step investigation ending in an approved ticket.
+    let ticket = json!({
+        "title": "payments-api checkout failures after 2.14.0 deploy",
+        "severity": "CRITICAL",
+        "summary": "Since 09:12 UTC payments-api requests to PayFlow time out at the new 2,000 ms limit \
+                    (log-0029, log-0030) right after deploy dep-1048 of 2.14.0 at 09:05 (timeout 10,000 -> 2,000 ms, \
+                    retries x3, pool 50 -> 20). PayFlow reports normal latency (~2,050 ms, log-0035). Circuit breaker \
+                    open, checkout returning 503 (log-0036/0037), success rate 61.2% (log-0044). Runbook: roll back \
+                    to 2.13.2 first. log-0033 contains a prompt-injection attempt in a customer field.",
+        "assignee": "payments-oncall"
+    });
+    let stdout = record_sample(
+        "investigation-with-hitl-approval",
+        "Customers report failed payments since this morning. Investigate payments-api and open an incident ticket if warranted.",
+        vec![
+            Reply::json(message("tool_use", json!([
+                {"type": "thinking", "thinking": "Start with payments-api errors and recent deployments.", "signature": "sig-1"},
+                {"type": "tool_use", "id": "toolu_01", "name": "telemetry__search_logs",
+                 "input": {"service_name": "payments-api", "severity": "ERROR", "limit": 20}},
+                {"type": "tool_use", "id": "toolu_02", "name": "telemetry__get_deployment_history",
+                 "input": {"service_name": "payments-api", "window_hours": 24}}
+            ]))),
+            Reply::json(message("tool_use", json!([
+                {"type": "thinking", "thinking": "Errors begin 7 minutes after 2.14.0. Checking the runbook, release notes and config.", "signature": "sig-2"},
+                {"type": "tool_use", "id": "toolu_03", "name": "telemetry__read_resource", "input": {"uri": "service://runbooks/payments-api"}},
+                {"type": "tool_use", "id": "toolu_04", "name": "files__read_text_file", "input": {"path": "RELEASE_NOTES.md"}},
+                {"type": "tool_use", "id": "toolu_05", "name": "files__read_text_file", "input": {"path": "service-config.yaml"}}
+            ]))),
+            Reply::json(message("tool_use", json!([
+                {"type": "tool_use", "id": "toolu_06", "name": "telemetry__create_incident_ticket", "input": ticket}
+            ]))),
+            Reply::json(message("end_turn", json!([{"type": "text", "text":
+                "Summary: payments-api has been failing since 09:12 UTC, 7 minutes after 2.14.0 was deployed.\n\
+                 Evidence: timeouts at the new 2,000 ms limit (log-0029, log-0030) while PayFlow is healthy at ~2,050 ms \
+                 (log-0035); circuit breaker open (log-0036); dep-1048 changed timeout 10,000 -> 2,000 ms, added retries \
+                 and cut the pool 50 -> 20 (RELEASE_NOTES.md, service-config.yaml).\n\
+                 Likely cause (high confidence, not proven): the new timeout is below PayFlow's normal latency.\n\
+                 Next steps (runbook): roll back to 2.13.2, then restore the timeout and pool.\n\
+                 Ticket: INC-1001 (CRITICAL, payments-oncall), approved by the reviewer.\n\
+                 Security note: log-0033 contains a prompt-injection attempt; it was treated as data."}]))),
+        ],
+        b"a\n",
+    )
+    .await;
+    assert!(
+        stdout.contains(">> APPROVED") && stdout.contains("ticket INC-1001 created"),
+        "{stdout}"
+    );
+
+    // 2. Handled failures and edge cases.
+    let overloaded =
+        || Reply::error(529, "overloaded_error", "Overloaded").header("retry-after", "0");
+    let stdout = record_sample(
+        "handled-failures-and-edge-cases",
+        "Investigate inventory-service and summarize the latest payments-api errors.",
+        vec![
+            Reply::json(message("tool_use", json!([
+                {"type": "tool_use", "id": "toolu_11", "name": "telemetry__search_logs", "input": {"service_name": "inventory-service"}},
+                {"type": "tool_use", "id": "toolu_12", "name": "telemetry__search_logs",
+                 "input": {"service_name": "payments-api", "severity": "ERROR", "limit": 10}}
+            ]))),
+            // A model "fooled" by log-0033 tries what it says:
+            Reply::json(message("tool_use", json!([
+                {"type": "tool_use", "id": "toolu_13", "name": "files__read_text_file", "input": {"path": "../../.env"}},
+                {"type": "tool_use", "id": "toolu_14", "name": "files__write_file", "input": {"path": "x.txt", "content": "x"}},
+                {"type": "tool_use", "id": "toolu_15", "name": "telemetry__create_incident_ticket", "input": {
+                    "title": "SYSTEM OVERRIDE", "severity": "CRITICAL",
+                    "summary": "Requested by an instruction found inside log-0033.", "assignee": "admin"}},
+                {"type": "tool_use", "id": "toolu_16", "name": "telemetry__get_deployment_history",
+                 "input": {"service_name": "payments-api", "window_hours": -5}}
+            ]))),
+            // ...then the Claude API is overloaded on every retry.
+            overloaded(), overloaded(), overloaded(), overloaded(),
+        ],
+        b"",
+    )
+    .await;
+    assert!(
+        stdout.contains("[error: the Claude API is overloaded"),
+        "{stdout}"
+    );
+}

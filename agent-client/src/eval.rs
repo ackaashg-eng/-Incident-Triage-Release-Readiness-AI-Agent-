@@ -419,7 +419,7 @@ pub async fn run(config: &Config, options: &EvalOptions) -> Result<bool> {
         &config.mcp.ops_reference_time,
         Box::new(approver.clone()),
     );
-    tracer.session_start(json!({"mode": "eval", "run_id": run_id, "model": config.model, "suite_version": suite.version}));
+    tracer.session_start(json!({"mode": "eval", "run_id": run_id, "model": config.model, "api_endpoint": config.api_base_url, "suite_version": suite.version}));
     let console = ConsoleObserver {
         show_tokens: false,
         redactor,

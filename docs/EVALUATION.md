@@ -100,6 +100,8 @@ Therefore B1–B7 and G1–G2 have **no live verdict**. In the evaluator's terms
 | 5 | "unreachable endpoint" test flaky on Windows | TCP connect to a closed port is retried for ~2 s | accept timeout or connect error |
 | 6 | Security test expected an error for `search_files **/.env` | the search is confined and correctly returns "No matches found" | assertion corrected (safe success) |
 | 6 | Real trace file polluted by tests; local paths (user name) in tool output | tests used the project's trace path; errors echo absolute paths | per-test `TRACE_FILE`; `<project>`/`<home>` redaction |
+| 8 | `setup.ps1` would start an interactive session and wait | it still ran `agent-client` with no arguments, which became the interactive mode in Phase 5 | setup runs `check-mcp` + `config`; verified with `setup.ps1 -SkipKey` (exit 0) |
+| 8 | CLI banner printed the full trace path (user name) into saved console output | banner bypassed the redactor | banner path redacted; `audit.ps1` checks samples |
 
 ### 6.2 Risks for the live run (predictions, not results)
 * **B6** is strict (`0 tool calls`); a model that does a quick health sweep before asking would `FAIL` by design of the check.

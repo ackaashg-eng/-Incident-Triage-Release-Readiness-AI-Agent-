@@ -277,12 +277,15 @@ pub async fn start_session(
     );
     println!(
         "Trace file: {} (session {})",
-        tracer.path().display(),
+        redactor.redact_str(&tracer.path().display().to_string()),
         tracer.session_id()
     );
 
     tracer.session_start(json!({
         "model": config.model,
+        // Which Claude endpoint served this session (the real API, or a local test endpoint).
+        "api_endpoint": config.api_base_url,
+        "agent_version": env!("CARGO_PKG_VERSION"),
         "effort": config.effort.to_string(),
         "max_iterations": config.max_iterations,
         "tool_timeout_ms": config.mcp.tool_timeout.as_millis() as u64,
