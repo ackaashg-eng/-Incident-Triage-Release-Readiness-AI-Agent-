@@ -2,7 +2,7 @@
 //! tool output going to Claude, trace lines, console echoes.
 //!
 //! Three mechanisms:
-//! 1. **Exact values** we know are secret (the Anthropic API key) are always
+//! 1. **Exact values** we know are secret (the active provider's API key) are always
 //!    replaced, wherever they appear.
 //! 2. **Credential patterns**: Anthropic/OpenAI/GitHub/Slack tokens, AWS
 //!    access key IDs, PEM private keys, `Bearer` tokens and `password=`-style
@@ -18,8 +18,9 @@ use serde_json::Value;
 pub const REDACTED: &str = "[REDACTED]";
 
 /// Token prefixes followed by at least `min` token characters.
-const TOKEN_PREFIXES: [(&str, usize); 9] = [
+const TOKEN_PREFIXES: [(&str, usize); 10] = [
     ("sk-ant-", 10),
+    ("sk-or-", 10),
     ("sk-proj-", 10),
     ("sk-live-", 10),
     ("ghp_", 20),
@@ -293,6 +294,10 @@ mod tests {
             (
                 "key sk-ant-api03-AbCdEf0123456789xyz end",
                 "key [REDACTED] end",
+            ),
+            (
+                "or key sk-or-v1-0123456789abcdef0123 end",
+                "or key [REDACTED] end",
             ),
             ("aws AKIAIOSFODNN7EXAMPLE here", "aws [REDACTED] here"),
             (

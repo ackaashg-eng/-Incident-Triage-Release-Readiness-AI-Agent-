@@ -25,6 +25,10 @@ const DEFAULT_LOG_LEVEL: &str = "warn";
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+/// Placeholder written in `.env.example` for the OpenRouter key; treated as "no key".
+pub const OPENROUTER_KEY_PLACEHOLDER: &str = "paste-your-openrouter-api-key-here";
 
 /// Everything that can be wrong with the configuration.
 /// Each message tells the user how to fix it.
@@ -39,6 +43,19 @@ pub enum ConfigError {
         "ANTHROPIC_API_KEY still contains the placeholder from .env.example. Run `scripts\\setup.ps1` to paste your real key."
     )]
     PlaceholderApiKey,
+
+    #[error("OPENROUTER_API_KEY is not set (LLM_PROVIDER=openrouter). Add it to the .env file.")]
+    MissingOpenRouterKey,
+
+    #[error(
+        "OPENROUTER_API_KEY still contains the placeholder from .env.example. Paste your real key."
+    )]
+    PlaceholderOpenRouterKey,
+
+    #[error(
+        "OPENROUTER_MODEL is not set (LLM_PROVIDER=openrouter). Pick a model slug from openrouter.ai/models."
+    )]
+    MissingOpenRouterModel,
 
     #[error("{name} has an invalid value `{value}`: {reason}")]
     InvalidValue {
@@ -78,6 +95,34 @@ impl fmt::Debug for ApiKey {
 impl fmt::Display for ApiKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("***")
+    }
+}
+
+/// Which LLM service the agent talks to (`LLM_PROVIDER`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Anthropic,
+    OpenRouter,
+}
+
+impl FromStr for Provider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "anthropic" => Ok(Self::Anthropic),
+            "openrouter" => Ok(Self::OpenRouter),
+            _ => Err("expected one of: anthropic, openrouter".to_string()),
+        }
+    }
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenRouter => "openrouter",
+        })
     }
 }
 
@@ -121,14 +166,21 @@ impl fmt::Display for Effort {
 /// The validated configuration of the orchestrator.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Which service `api_key`, `model` and `api_base_url` belong to.
+    pub provider: Provider,
+    /// Key of the ACTIVE provider (Anthropic or OpenRouter).
     pub api_key: ApiKey,
+    /// Model of the ACTIVE provider (an OpenRouter slug when `provider` is OpenRouter).
     pub model: String,
+    /// OpenRouter only: backup model slugs tried if the main model fails.
+    pub openrouter_fallbacks: Vec<String>,
     pub effort: Effort,
     /// Server-side refusal fallbacks (`fallbacks: "default"`).
     pub fallbacks: bool,
     /// Ask for short progress notes between tool calls (`thinking.display: "updates"`).
     pub progress_updates: bool,
-    /// `https://api.anthropic.com` unless overridden (tests use a local fake server).
+    /// Base URL of the ACTIVE provider. Anthropic: `https://api.anthropic.com`;
+    /// OpenRouter: `https://openrouter.ai/api/v1` (tests use a local fake server).
     pub api_base_url: String,
     /// Timeout for one Messages API HTTP request.
     pub request_timeout: Duration,
@@ -163,11 +215,50 @@ impl Config {
                 .filter(|v| !v.is_empty())
         };
 
-        let api_key = match get("ANTHROPIC_API_KEY") {
-            None => return Err(ConfigError::MissingApiKey),
-            Some(k) if k == API_KEY_PLACEHOLDER => return Err(ConfigError::PlaceholderApiKey),
-            Some(k) => ApiKey(k),
+        let provider = match get("LLM_PROVIDER") {
+            None => Provider::Anthropic,
+            Some(v) => v.parse().map_err(|reason| ConfigError::InvalidValue {
+                name: "LLM_PROVIDER",
+                value: v.clone(),
+                reason,
+            })?,
         };
+
+        // Only the selected provider's key is required.
+        let api_key = match provider {
+            Provider::Anthropic => match get("ANTHROPIC_API_KEY") {
+                None => return Err(ConfigError::MissingApiKey),
+                Some(k) if k == API_KEY_PLACEHOLDER => {
+                    return Err(ConfigError::PlaceholderApiKey);
+                }
+                Some(k) => ApiKey(k),
+            },
+            Provider::OpenRouter => match get("OPENROUTER_API_KEY") {
+                None => return Err(ConfigError::MissingOpenRouterKey),
+                Some(k) if k == OPENROUTER_KEY_PLACEHOLDER => {
+                    return Err(ConfigError::PlaceholderOpenRouterKey);
+                }
+                Some(k) => ApiKey(k),
+            },
+        };
+
+        let model = match provider {
+            Provider::Anthropic => {
+                get("ANTHROPIC_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string())
+            }
+            Provider::OpenRouter => {
+                get("OPENROUTER_MODEL").ok_or(ConfigError::MissingOpenRouterModel)?
+            }
+        };
+
+        let openrouter_fallbacks: Vec<String> = get("OPENROUTER_FALLBACKS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let effort = match get("ANTHROPIC_EFFORT") {
             None => Effort::Medium,
@@ -195,8 +286,12 @@ impl Config {
             10..=900,
         )?;
 
-        let api_base_url = get("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+        let (base_url_var, base_url_default) = match provider {
+            Provider::Anthropic => ("ANTHROPIC_BASE_URL", DEFAULT_BASE_URL),
+            Provider::OpenRouter => ("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL),
+        };
+        let api_base_url = get(base_url_var)
+            .unwrap_or_else(|| base_url_default.to_string())
             .trim_end_matches('/')
             .to_string();
         if !(api_base_url.starts_with("https://")
@@ -204,7 +299,7 @@ impl Config {
             || api_base_url.starts_with("http://localhost"))
         {
             return Err(ConfigError::InvalidValue {
-                name: "ANTHROPIC_BASE_URL",
+                name: base_url_var,
                 value: api_base_url,
                 reason: "must be an https:// URL (plain http only for localhost testing)"
                     .to_string(),
@@ -222,8 +317,10 @@ impl Config {
         let tool_timeout_overrides = parse_timeout_overrides(get("TOOL_TIMEOUT_OVERRIDES"))?;
 
         Ok(Self {
+            provider,
             api_key,
-            model: get("ANTHROPIC_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            model,
+            openrouter_fallbacks,
             effort,
             fallbacks,
             progress_updates,
@@ -579,6 +676,77 @@ mod tests {
                 other => panic!("{name}={value}: unexpected {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn provider_defaults_to_anthropic() {
+        let cfg = load(&[("ANTHROPIC_API_KEY", "k")]).unwrap();
+        assert_eq!(cfg.provider, Provider::Anthropic);
+        assert!(cfg.openrouter_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn openrouter_needs_only_its_own_key_and_model() {
+        // No ANTHROPIC_API_KEY at all.
+        let cfg = load(&[
+            ("LLM_PROVIDER", "OpenRouter"),
+            ("OPENROUTER_API_KEY", "sk-or-SECRET456"),
+            ("OPENROUTER_MODEL", "some-vendor/some-model:free"),
+            ("OPENROUTER_FALLBACKS", " a/b , c/d ,, "),
+        ])
+        .unwrap();
+        assert_eq!(cfg.provider, Provider::OpenRouter);
+        assert_eq!(cfg.model, "some-vendor/some-model:free");
+        assert_eq!(cfg.api_base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(cfg.openrouter_fallbacks, vec!["a/b", "c/d"]);
+        assert_eq!(cfg.api_key.expose(), "sk-or-SECRET456");
+        assert!(!format!("{cfg:?}").contains("SECRET456"));
+    }
+
+    #[test]
+    fn openrouter_errors_are_specific() {
+        assert_eq!(
+            load(&[("LLM_PROVIDER", "openrouter"), ("ANTHROPIC_API_KEY", "k")]).unwrap_err(),
+            ConfigError::MissingOpenRouterKey
+        );
+        assert_eq!(
+            load(&[
+                ("LLM_PROVIDER", "openrouter"),
+                ("OPENROUTER_API_KEY", OPENROUTER_KEY_PLACEHOLDER),
+            ])
+            .unwrap_err(),
+            ConfigError::PlaceholderOpenRouterKey
+        );
+        assert_eq!(
+            load(&[("LLM_PROVIDER", "openrouter"), ("OPENROUTER_API_KEY", "k")]).unwrap_err(),
+            ConfigError::MissingOpenRouterModel
+        );
+    }
+
+    #[test]
+    fn bad_provider_and_bad_openrouter_url_are_rejected() {
+        let err = load(&[("LLM_PROVIDER", "gemini"), ("ANTHROPIC_API_KEY", "k")]).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue {
+                name: "LLM_PROVIDER",
+                ..
+            }
+        ));
+        let err = load(&[
+            ("LLM_PROVIDER", "openrouter"),
+            ("OPENROUTER_API_KEY", "k"),
+            ("OPENROUTER_MODEL", "m"),
+            ("OPENROUTER_BASE_URL", "http://evil.example.com"),
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue {
+                name: "OPENROUTER_BASE_URL",
+                ..
+            }
+        ));
     }
 
     #[test]

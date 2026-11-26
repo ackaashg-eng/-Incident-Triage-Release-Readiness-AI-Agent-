@@ -3,6 +3,7 @@
 [workspace]
 resolver = "3"
 members = ["mcp-server", "agent-client"]
+exclude = ["desktop-ui/src-tauri"]
 
 # Settings every member crate inherits with `xxx.workspace = true`.
 [workspace.package]

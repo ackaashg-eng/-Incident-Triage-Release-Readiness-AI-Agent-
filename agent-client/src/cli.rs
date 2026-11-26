@@ -15,9 +15,9 @@ use crate::agent::{
     Agent, AgentEvent, AgentSettings, ApprovalStatus, Fanout, Observer, ToolStatus, TurnOutcome,
     TurnReport,
 };
-use crate::config::Config;
+use crate::config::{Config, Provider};
 use crate::llm::types::MAX_TOKENS;
-use crate::llm::{AnthropicClient, StopReason};
+use crate::llm::{AnthropicClient, AnyClient, OpenRouterClient, StopReason};
 use crate::mcp::manager::ServerSet;
 use crate::safety::redact::Redactor;
 use crate::trace::{Tracer, new_session_id};
@@ -189,7 +189,7 @@ fn path_aliases(config: &Config) -> Vec<(String, String)> {
 
 /// A running session: the agent plus its trace file.
 pub struct Session {
-    pub agent: Agent<AnthropicClient>,
+    pub agent: Agent<AnyClient>,
     pub tracer: Tracer,
     pub console: ConsoleObserver,
 }
@@ -245,12 +245,26 @@ pub async fn start_session(
         bail!("no MCP server could be started; run `agent-client check-mcp` for details");
     }
 
-    let llm = AnthropicClient::new(
-        config.api_key.clone(),
-        &config.api_base_url,
-        config.request_timeout,
-    )
-    .context("could not create the Claude API client")?;
+    let llm = match config.provider {
+        Provider::Anthropic => AnyClient::Anthropic(
+            AnthropicClient::new(
+                config.api_key.clone(),
+                &config.api_base_url,
+                config.request_timeout,
+            )
+            .context("could not create the Claude API client")?,
+        ),
+        Provider::OpenRouter => AnyClient::OpenRouter(
+            OpenRouterClient::new(
+                config.api_key.clone(),
+                config.model.clone(),
+                Some(config.api_base_url.clone()),
+                config.openrouter_fallbacks.clone(),
+                config.request_timeout,
+            )
+            .context("could not create the OpenRouter client")?,
+        ),
+    };
     let agent = Agent::new(
         llm,
         agent_settings(config),
@@ -267,12 +281,18 @@ pub async fn start_session(
         .iter()
         .filter(|t| t.permission == Permission::RequiresApproval)
         .count();
+    // `effort` is an Anthropic-only setting; do not show it for other providers.
+    let effort = if config.provider == Provider::Anthropic {
+        format!(", effort {}", config.effort)
+    } else {
+        String::new()
+    };
     println!(
-        "Discovered {} tools for Claude ({read_only} read-only, {approval} need approval; {} excluded by policy). Model: {}, effort {}, max {} steps per request.",
+        "Discovered {} tools for Claude ({read_only} read-only, {approval} need approval; {} excluded by policy). Provider: {}, model: {}{effort}, max {} steps per request.",
         reg.len(),
         reg.excluded.len(),
+        config.provider,
         config.model,
-        config.effort,
         config.max_iterations
     );
     println!(
@@ -282,6 +302,7 @@ pub async fn start_session(
     );
 
     tracer.session_start(json!({
+        "provider": config.provider.to_string(),
         "model": config.model,
         // Which Claude endpoint served this session (the real API, or a local test endpoint).
         "api_endpoint": config.api_base_url,
@@ -304,7 +325,7 @@ pub async fn start_session(
     })
 }
 
-fn print_tools(agent: &Agent<AnthropicClient>) {
+fn print_tools(agent: &Agent<AnyClient>) {
     for t in agent.registry().iter() {
         println!("  {:<40} {:<10} {}", t.name, t.server, t.permission);
     }
@@ -313,7 +334,7 @@ fn print_tools(agent: &Agent<AnthropicClient>) {
     }
 }
 
-fn print_servers(agent: &Agent<AnthropicClient>) {
+fn print_servers(agent: &Agent<AnyClient>) {
     for s in agent.servers().discovered() {
         println!("  {}: {}", s.name, s.label);
     }

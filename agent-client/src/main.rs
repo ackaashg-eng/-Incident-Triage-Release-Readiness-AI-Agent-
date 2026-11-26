@@ -95,7 +95,7 @@ fn eval_options(base_dir: &Path, args: &[&str]) -> Result<eval::EvalOptions> {
 fn load(base_dir: &Path) -> Result<Config> {
     let config = Config::load(base_dir)?;
     logging::init(&config.log_level)?;
-    tracing::info!(model = %config.model, effort = %config.effort, max_iterations = config.max_iterations, "configuration loaded");
+    tracing::info!(provider = %config.provider, model = %config.model, effort = %config.effort, max_iterations = config.max_iterations, "configuration loaded");
     Ok(config)
 }
 
@@ -108,6 +108,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 
 fn print_config(cfg: &Config) {
     println!("Incident Triage Agent - configuration");
+    println!("  provider           : {}", cfg.provider);
     println!("  model              : {}", cfg.model);
     println!("  effort             : {}", cfg.effort);
     println!("  refusal fallbacks  : {}", on_off(cfg.fallbacks));

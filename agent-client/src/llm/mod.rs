@@ -5,7 +5,11 @@
 //!   `LlmClient` trait the agent depends on (so tests can script Claude)
 
 pub mod anthropic;
+mod any;
+pub mod openrouter;
 pub mod types;
 
 pub use anthropic::{AnthropicClient, LlmClient, LlmError};
+pub use any::AnyClient;
+pub use openrouter::OpenRouterClient;
 pub use types::{MessageResponse, MessagesRequest, StopReason, ToolDefinition, ToolUse};
