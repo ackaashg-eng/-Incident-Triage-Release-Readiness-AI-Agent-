@@ -6,6 +6,8 @@
 # ---- Build output / dependencies ----
 /target/
 /node_modules/
+**/target/
+**/node_modules/
 *.tgz
 
 # ---- Runtime data (created when the agent runs) ----
