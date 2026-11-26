@@ -4,8 +4,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct McpServerStatus {
     pub name: String,
     pub status: String,
@@ -39,6 +41,7 @@ pub struct DeploymentRecord {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub id: String,
     pub sender: String,
@@ -48,6 +51,7 @@ pub struct ChatMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolCallInfo {
     pub server: String,
     pub tool: String,
@@ -57,8 +61,9 @@ pub struct ToolCallInfo {
 }
 
 fn repo_root() -> PathBuf {
-    // Current dir or parent of src-tauri
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 #[tauri::command]
@@ -156,36 +161,96 @@ fn get_deployments(service: Option<String>) -> Result<Vec<DeploymentRecord>, Str
 
 #[tauri::command]
 async fn run_agent_turn(prompt: String) -> Result<ChatMessage, String> {
-    // Return structured AI reasoning and tool calls
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("Prompt cannot be empty".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || run_agent_process(&prompt))
+        .await
+        .map_err(|e| format!("Agent task failed: {e}"))?
+}
+
+fn run_agent_process(prompt: &str) -> Result<ChatMessage, String> {
+    let root = repo_root();
+    let executable = root.join("target").join("debug").join("agent-client.exe");
+    if !executable.is_file() {
+        return Err(format!(
+            "Agent executable not found at {}. Run `cargo build --workspace` first.",
+            executable.display()
+        ));
+    }
+
+    let output = Command::new(executable)
+        .arg("ask")
+        .arg(prompt)
+        .current_dir(&root)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Could not start the agent: {e}"))?;
+
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.stderr.is_empty() {
+        combined.push('\n');
+        combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+
+    let content = extract_answer(&combined).unwrap_or_else(|| {
+        if combined.trim().is_empty() {
+            "The agent returned no output.".to_string()
+        } else {
+            combined.trim().to_string()
+        }
+    });
+
+    if !output.status.success() && extract_answer(&combined).is_none() {
+        return Err(content);
+    }
+
     Ok(ChatMessage {
         id: format!("msg-{}", chrono::Utc::now().timestamp_millis()),
         sender: "agent".into(),
-        content: format!(
-            "Investigation initiated for: \"{}\".\n\n\
-            1. Correlating deployment timeline with telemetry error spikes.\n\
-            2. Identified deployment 'dep-1048' (payments-api v2.14.0) deployed at 2026-11-20T09:05:00Z.\n\
-            3. Error logs show PayFlow downstream timeout decreased from 10000ms to 2000ms.\n\
-            4. Connection pool saturation followed by circuit breaker trip.",
-            prompt
-        ),
+        content,
         timestamp: chrono::Utc::now().to_rfc3339(),
-        tool_calls: Some(vec![
-            ToolCallInfo {
-                server: "ops-telemetry-mcp".into(),
-                tool: "search_logs".into(),
-                status: "success".into(),
-                args: serde_json::json!({ "service_name": "payments-api", "severity": "ERROR", "limit": 20 }),
-                result: Some(serde_json::json!({ "matches": 6 })),
-            },
-            ToolCallInfo {
-                server: "ops-telemetry-mcp".into(),
-                tool: "get_deployment_history".into(),
-                status: "success".into(),
-                args: serde_json::json!({ "service_name": "payments-api", "window_hours": 24 }),
-                result: Some(serde_json::json!({ "active_version": "2.14.0" })),
-            },
-        ]),
+        tool_calls: Some(parse_tool_calls(&combined)),
     })
+}
+
+fn extract_answer(output: &str) -> Option<String> {
+    let answer_start = output.rfind("claude> ")?;
+    let answer = &output[answer_start + "claude> ".len()..];
+    let answer = answer
+        .split("\n\n  [")
+        .next()
+        .unwrap_or(answer)
+        .trim();
+    (!answer.is_empty()).then(|| answer.to_string())
+}
+
+fn parse_tool_calls(output: &str) -> Vec<ToolCallInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let rest = line.strip_prefix("-> ")?;
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let name = parts.next()?.trim();
+            let args_text = parts.next().unwrap_or_default().trim();
+            let args = serde_json::from_str::<serde_json::Value>(args_text)
+                .unwrap_or_else(|_| serde_json::json!({ "raw": args_text }));
+            let (server, tool) = name
+                .split_once("__")
+                .map(|(server, tool)| (server, tool))
+                .unwrap_or(("agent", name));
+            Some(ToolCallInfo {
+                server: server.to_string(),
+                tool: tool.to_string(),
+                status: "success".to_string(),
+                args,
+                result: None,
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]
